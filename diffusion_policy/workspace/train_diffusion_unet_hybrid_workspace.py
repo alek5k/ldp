@@ -216,13 +216,15 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if ((self.epoch + 1) % cfg.training.rollout_every) == 0:
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
 
                 # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
+                # Keep validation and checkpoint epochs aligned so val_loss
+                # is available when it is used as the top-k monitor.
+                if ((self.epoch + 1) % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
@@ -259,7 +261,7 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                         del mse
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
+                if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()

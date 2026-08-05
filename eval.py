@@ -25,7 +25,25 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 @click.option('-p', '--force_perturbs', default=None)
 @click.option('-d', '--device', default='cuda:0')
 @click.option('-n', '--num_samples', default=1)
-def main(checkpoint, output_dir, force_perturbs, device, num_samples):
+@click.option('--zarr_path', default=None,
+    help='Optional Zarr store for temporal evaluation episodes.')
+@click.option('--n_test', type=int, default=None,
+    help='Override the number of fixed-seed test episodes.')
+@click.option('--n_train', type=int, default=None,
+    help='Optional number of training-seed episodes (defaults to 0 for Zarr evaluation).')
+@click.option('--n_test_vis', type=int, default=None,
+    help='Override how many test episodes also receive MP4 recordings.')
+@click.option('--test_start_seed', type=int, default=None,
+    help='Override the first deterministic test seed.')
+@click.option('--max_steps', type=int, default=None,
+    help='Override the maximum number of environment steps per episode.')
+@click.option('--n_action_steps', type=int, default=None,
+    help='Override the number of predicted actions executed before replanning.')
+@click.option('--num_inference_steps', type=int, default=None,
+    help='Override the diffusion denoising steps used by the loaded policy.')
+def main(checkpoint, output_dir, force_perturbs, device, num_samples,
+         zarr_path, n_test, n_train, n_test_vis, test_start_seed, max_steps,
+         n_action_steps, num_inference_steps):
     if os.path.exists(output_dir):
         click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -64,6 +82,40 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples):
             cfg.task.env_runner.perturbations = perturb_cfg
             cfg.task.env_runner.n_test = 150 # many evals for lower variance
 
+    if num_inference_steps is not None:
+        policy.num_inference_steps = num_inference_steps
+
+    if any(value is not None for value in
+           (zarr_path, n_test, n_test_vis, test_start_seed, max_steps,
+            n_action_steps)):
+        if "temporal_image_runner" not in cfg.task.env_runner._target_:
+            raise click.UsageError(
+                "--zarr_path and temporal episode overrides require TemporalImageRunner")
+        with open_dict(cfg):
+            if zarr_path is not None:
+                cfg.task.env_runner.zarr_path = zarr_path
+                cfg.task.env_runner.zarr_mode = 'w'
+            if n_test is not None:
+                cfg.task.env_runner.n_test = n_test
+            # Inference is normally test-only. The training runner's default
+            # visual rollouts are useful during fitting but should not be
+            # mixed into a checkpoint evaluation Zarr unless requested.
+            cfg.task.env_runner.n_train = 0 if n_train is None else n_train
+            cfg.task.env_runner.n_train_vis = 0
+            if n_test_vis is not None:
+                cfg.task.env_runner.n_test_vis = n_test_vis
+            if test_start_seed is not None:
+                cfg.task.env_runner.test_start_seed = test_start_seed
+            if max_steps is not None:
+                cfg.task.env_runner.max_steps = max_steps
+            if n_action_steps is not None:
+                if n_action_steps < 1:
+                    raise click.UsageError("--n_action_steps must be positive")
+                # The transformer always predicts the full horizon here; this
+                # setting chooses how many of those predictions to execute.
+                policy.n_action_steps = n_action_steps
+                cfg.task.env_runner.n_action_steps = n_action_steps
+
     # run eval
     env_runner = hydra.utils.instantiate(
         cfg.task.env_runner,
@@ -80,8 +132,6 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples):
             json_log[key] = value
     out_path = os.path.join(output_dir, 'eval_log.json')
     print(json_log)
-    import IPython
-    IPython.embed()
     json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
 
 if __name__ == '__main__':

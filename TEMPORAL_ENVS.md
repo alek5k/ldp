@@ -1,0 +1,94 @@
+# Temporal environments in LDP
+
+`diffusion_policy.env.waitatgoal.WaitAtGoal` and
+`diffusion_policy.env.liftqa.LiftQA` are native copies of the environments
+previously maintained in TemporalDiffusionPolicy. Training reads the existing
+TemporalDiffusionPolicy Zarr episodes directly; no data collection or HDF5
+conversion is required.
+
+## Environment
+
+```bash
+conda activate robodiff-lh-5090
+cd /home/sydney1/Repos/ldp
+```
+
+The launchers default to `MUJOCO_GL=egl`, `SDL_VIDEODRIVER=dummy`, and
+`NUMBA_DISABLE_JIT=1`, so they work over SSH. They also default to full 144×144
+frames, no crop, and `SpatialMeanPool` rather than SpatialSoftmax. The commands
+below set the visual options explicitly so an exported shell variable cannot
+change the experiment accidentally.
+
+## Run presets
+
+The training launcher always enables full PTP (`past_action_pred=true`,
+`past_steps_reg=-1`), validates every 10 epochs, and ranks checkpoints by
+held-out `val_loss`. Training rollouts are disabled; each command runs the
+fixed-seed Zarr evaluation immediately afterward.
+
+### Fair TC-DP comparison
+
+Use this for a direct comparison with the current TC-DP inference setup: two
+adjacent observations, 16 predicted tokens, eight executed actions, batch size
+512, and 200 epochs. It has one PTP past-action target and 14 future-action
+targets.
+
+```bash
+GPU=0 ENV=liftqa HORIZON=16 N_OBS=2 SUBSAMPLE=1 N_ACTION=8 EPOCHS=200 BATCH=512; RUN=${ENV}_h${HORIZON}_o${N_OBS}_s${SUBSAMPLE}_a${N_ACTION}_e${EPOCHS}; LDP_CROP_SHAPE=null LDP_IMAGE_POOL_CLASS=SpatialMeanPool CUDA_VISIBLE_DEVICES=$GPU ./train_temporal_long_context.sh $ENV data/outputs/$RUN horizon=$HORIZON n_obs_steps=$N_OBS n_action_steps=$N_ACTION task.dataset.subsample_frames=$SUBSAMPLE task.env_runner.subsample_frames=$SUBSAMPLE dataloader.batch_size=$BATCH val_dataloader.batch_size=$BATCH training.num_epochs=$EPOCHS && CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh $ENV data/outputs/$RUN/checkpoints/latest.ckpt data/inference/${RUN}_eval --n_test=200 --n_test_vis=10 --test_start_seed=200 --max_steps=400 --num_inference_steps=100
+```
+
+Set `ENV=waitatgoal` to run the same fair condition on WaitAtGoal.
+
+### PTP-focused long-history runs
+
+These are deliberately not strict TC-DP-parity runs. They use the paper's
+long-context table row: 16 adjacent observations, a 32-token action horizon,
+and 16 future tokens. Full PTP therefore supervises 15 past actions, the
+current action, and 16 future actions. `n_action_steps=8` is separate: it only
+controls how many predicted actions are executed before replanning.
+
+Both environments use `subsample_frames=1`, so all 16 observations are
+adjacent rather than temporally spaced. Batch size 64 keeps the 16-image visual
+context practical; 500 epochs follows the paper's simulation-training
+duration.
+
+#### WaitAtGoal
+
+```bash
+cd ~/Repos/ldp && conda activate robodiff-lh-5090 
+GPU=1 ENV=waitatgoal HORIZON=32 N_OBS=16 SUBSAMPLE=1 N_ACTION=8 EPOCHS=500 BATCH=128; RUN=${ENV}_h${HORIZON}_o${N_OBS}_s${SUBSAMPLE}_a${N_ACTION}_e${EPOCHS}; LDP_CROP_SHAPE=null LDP_IMAGE_POOL_CLASS=SpatialMeanPool CUDA_VISIBLE_DEVICES=$GPU ./train_temporal_long_context.sh $ENV data/outputs/$RUN horizon=$HORIZON n_obs_steps=$N_OBS n_action_steps=$N_ACTION task.dataset.subsample_frames=$SUBSAMPLE task.env_runner.subsample_frames=$SUBSAMPLE dataloader.batch_size=$BATCH val_dataloader.batch_size=$BATCH training.num_epochs=$EPOCHS && CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh $ENV data/outputs/$RUN/checkpoints/latest.ckpt data/inference/${RUN}_eval --n_test=200 --n_test_vis=10 --test_start_seed=200 --max_steps=400 --num_inference_steps=100
+```
+
+#### LiftQA
+
+```bash
+cd ~/Repos/ldp && conda activate robodiff-lh-5090 
+GPU=0 ENV=liftqa HORIZON=32 N_OBS=16 SUBSAMPLE=1 N_ACTION=8 EPOCHS=500 BATCH=128; RUN=${ENV}_h${HORIZON}_o${N_OBS}_s${SUBSAMPLE}_a${N_ACTION}_e${EPOCHS}; LDP_CROP_SHAPE=null LDP_IMAGE_POOL_CLASS=SpatialMeanPool CUDA_VISIBLE_DEVICES=$GPU ./train_temporal_long_context.sh $ENV data/outputs/$RUN horizon=$HORIZON n_obs_steps=$N_OBS n_action_steps=$N_ACTION task.dataset.subsample_frames=$SUBSAMPLE task.env_runner.subsample_frames=$SUBSAMPLE dataloader.batch_size=$BATCH val_dataloader.batch_size=$BATCH training.num_epochs=$EPOCHS && CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh $ENV data/outputs/$RUN/checkpoints/latest.ckpt data/inference/${RUN}_eval --n_test=200 --n_test_vis=10 --test_start_seed=200 --max_steps=400 --num_inference_steps=100
+```
+
+cd ~/Repos/ldp && conda activate robodiff-lh-5090 
+GPU=1 ENV=liftqa HORIZON=32 N_OBS=16 SUBSAMPLE=1 N_ACTION=8 EPOCHS=500 BATCH=128; RUN=liftqa_h32_o16_s1_a8_e500; LDP_CROP_SHAPE=null LDP_IMAGE_POOL_CLASS=SpatialMeanPool && CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh $ENV data/outputs/$RUN/checkpoints/epoch=0249-val_loss=0.142.ckpt data/inference/${RUN}_epoch250_eval --n_test=200 --n_test_vis=10 --test_start_seed=200 --max_steps=400 --num_inference_steps=100
+
+
+### Why embeddings are not cached
+
+The paper caches frozen visual-encoder features only to avoid recomputing them
+during training. With identical preprocessing and optimization, that does not
+improve task success. These runs therefore train end-to-end from the original
+Zarr images; evaluation always encodes newly generated environment images
+online in any case.
+
+## Evaluation output
+
+`eval_temporal_policy.sh` is the supported evaluation entry point. It applies
+SSH-safe rendering defaults and writes `$OUTPUT_DIR/rollouts.zarr` in the same
+`data/` and `meta/episode_ends` layout as TemporalDiffusionPolicy. Each entry
+has the pre-action environment observation (`full_image` and `agent_pose`),
+action, reward, and done flag. WaitAtGoal also records `wait_time`,
+`step_count`, and `wait_times_each_visit`. The presets evaluate 200 fixed-seed
+test episodes and record MP4s for the first 10.
+
+The source datasets are:
+
+- `/mnt/shared/TemporalDiffusionPolicy/data/demonstration/wait_at_goal_dataset_v4.zarr`
+- `/mnt/shared/TemporalDiffusionPolicy/data/demonstration/lift_qa_v2.zarr`

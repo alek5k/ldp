@@ -223,7 +223,11 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                     step_log.update(runner_log)
 
                 # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
+                # Match the checkpoint schedule below: epoch numbers are
+                # one-based externally, so validation must run at epochs
+                # 10, 20, ... rather than 1, 11, ....  This also guarantees
+                # that val_loss exists when a 50-epoch checkpoint is ranked.
+                if ((self.epoch + 1) % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 

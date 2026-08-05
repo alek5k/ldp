@@ -1,0 +1,40 @@
+name: waitatgoal_image
+
+image_shape: &image_shape [3, 144, 144]
+shape_meta: &shape_meta
+  obs:
+    image:
+      shape: *image_shape
+      type: rgb
+    agent_pose:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [2]
+
+env_runner:
+  _target_: diffusion_policy.env_runner.temporal_image_runner.TemporalImageRunner
+  env_name: waitatgoal
+  n_train: 2
+  n_train_vis: 1
+  train_start_seed: 0
+  n_test: 10
+  n_test_vis: 2
+  test_start_seed: 10000
+  max_steps: 400
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  subsample_frames: 1
+  fps: 10
+  render_size: 144
+
+dataset:
+  _target_: diffusion_policy.dataset.temporal_zarr_image_dataset.TemporalZarrImageDataset
+  zarr_path: /mnt/shared/TemporalDiffusionPolicy/data/demonstration/wait_at_goal_dataset_v4.zarr
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  subsample_frames: 1
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02

@@ -88,6 +88,7 @@ class DiffusionTransformerHybridImagePolicy(BaseImagePolicy):
             time_as_cond=True,
             obs_as_cond=True,
             pred_action_steps_only=False,
+            image_pool_class="SpatialSoftmax",
             # parameters passed to step
             past_action_pred=False,
             obs_encoder_dir=None,
@@ -133,6 +134,7 @@ class DiffusionTransformerHybridImagePolicy(BaseImagePolicy):
         with config.unlocked():
             # set config with shape_meta
             config.observation.modalities.obs = obs_config
+            config.observation.encoder.rgb.core_kwargs.pool_class = image_pool_class
 
             if crop_shape is None:
                 for key, modality in config.observation.encoder.items():

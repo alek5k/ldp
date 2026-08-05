@@ -6,6 +6,9 @@ Paper: https://arxiv.org/abs/2505.09561
 
 We are very grateful for the great work done by Chi et al with the [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) github repository, from which we adapted our repository.
 
+For the migrated WaitAtGoal and LiftQA environments, native Zarr recording,
+long-context training, and analysis rollouts, see [TEMPORAL_ENVS.md](TEMPORAL_ENVS.md).
+
 # 🧰 Installation
 
 1. Install Diffusion Policy (with Conda):
