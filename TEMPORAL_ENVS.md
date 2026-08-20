@@ -110,3 +110,63 @@ CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh waitatgoal data/outputs/wait
 
 The default batch size is 16 because every batch encodes causal image prefixes
 online.  Change `dataloader.batch_size` only after checking GPU memory.
+
+### LDP image benchmarks
+
+LTE-IMG-NoT also runs directly on LDP's existing Square, ToolHang, Transport,
+long-history ALOHA, and long-history Square environments. The standalone
+configs under `experiment_configs/` contain the benchmark dataset and runner
+settings rather than modifying generic task defaults. The normal policy encoder
+retains every task camera; LTE uses one declared primary camera to match the
+original single-ResNet-image temporal input:
+
+| Launcher task | Default experiment config | Dataset | LTE camera |
+| --- | --- | --- | --- |
+| `square` | `square/lte_img_not_transformer.yaml` | Square MH, absolute actions | `agentview_image` |
+| `tool_hang` | `tool/lte_img_not_transformer.yaml` | Tool Hang PH, absolute actions | `sideview_image` |
+| `transport` | `transport/lte_img_not_transformer.yaml` | Transport MH, absolute actions | `shouldercamera0_image` |
+| `lh-aloha` | `aloha/lte_img_not_transformer.yaml` | long-horizon ALOHA | `top` |
+| `lh-square` | `longhist/lte_img_not_transformer.yaml` | long-horizon Square | `agentview_image` |
+
+```bash
+cd ~/Repos/ldp && conda activate robodiff-lh-5090
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh square data/outputs/square_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh tool_hang data/outputs/tool_hang_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh transport data/outputs/transport_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh lh-aloha data/outputs/lh_aloha_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh lh-square data/outputs/lh_square_lte_img_not
+```
+
+The transformer decoder is the default. It receives two adjacent observations;
+LTE alone carries longer history, and no PTP past-action objective is used. Add
+the `-unet` suffix to any launcher task to select the original U-Net decoder.
+
+For interactive launch and evaluation in a detached `screen` session, run
+`python experiment_cli.py`. It offers `train`, `eval`, and `train+eval`; each
+mode asks for the number of sequential runs and assigns consecutive seeds
+starting at 42 by default.
+
+```bash
+MUJOCO_GL=egl MPLCONFIGDIR=/tmp/ldp_mpl CUDA_VISIBLE_DEVICES=0 \
+  ./train_lte_img_not.sh lh-aloha data/outputs/lh_aloha_lte_transformer_seed42 \
+  training.seed=42 training.device=cuda:0
+MUJOCO_GL=egl MPLCONFIGDIR=/tmp/ldp_mpl CUDA_VISIBLE_DEVICES=0 \
+  ./train_lte_img_not.sh lh-square data/outputs/lh_square_lte_transformer_seed42 \
+  training.seed=42 training.device=cuda:0
+```
+
+`train_lte_img_not.sh` takes `TASK OUTPUT_DIR [Hydra overrides...]`. Use a
+different output directory for every seed, so checkpoints and logs do not
+overwrite each other. For example, a second LH-Square seed is:
+
+```bash
+MUJOCO_GL=egl MPLCONFIGDIR=/tmp/ldp_mpl CUDA_VISIBLE_DEVICES=0 \
+  ./train_lte_img_not.sh lh-square data/outputs/lh_square_lte_transformer_seed43 \
+  training.seed=43 training.device=cuda:0
+```
+
+These presets use the task config's action-replanning horizon. They use the
+corresponding released experiment's rollout cadence and retain checkpoints by
+maximum `test_mean_score`, rather than by offline validation loss. LTE keeps a
+batch size of 16 in the U-Net presets because it encodes causal image prefixes
+online; the aligned transformer presets use batch size 64.

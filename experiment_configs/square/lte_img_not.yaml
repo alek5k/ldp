@@ -1,0 +1,67 @@
+# @package _global_
+defaults:
+  - /lte_img_not_base
+  - _self_
+
+# Matches the Square configuration used for the paper experiments.
+task:
+  name: square_image_abs
+  task_name: square
+  dataset_type: mh
+  lte_temporal_rgb_key: agentview_image
+  lte_horizon: 16
+  lte_n_obs_steps: 2
+  lte_n_action_steps: 1
+  shape_meta:
+    obs:
+      agentview_image: {shape: [3, 84, 84], type: rgb}
+      robot0_eye_in_hand_image: {shape: [3, 84, 84], type: rgb}
+      robot0_eef_pos: {shape: [3]}
+      robot0_eef_quat: {shape: [4]}
+      robot0_gripper_qpos: {shape: [2]}
+    action: {shape: [10]}
+  dataset:
+    _target_: diffusion_policy.dataset.robomimic_replay_image_dataset.RobomimicReplayImageDataset
+    dataset_path: data/robomimic/datasets/square/mh/image_abs.hdf5
+    shape_meta: ${task.shape_meta}
+    horizon: ${horizon}
+    n_obs_steps: ${dataset_obs_steps}
+    pad_before: 1
+    pad_after: 0
+    abs_action: true
+    rotation_rep: rotation_6d
+    use_legacy_normalizer: false
+    use_cache: true
+    seed: 42
+    val_ratio: 0.02
+    return_temporal_history: true
+  env_runner:
+    _target_: diffusion_policy.env_runner.robomimic_image_runner.RobomimicImageRunner
+    dataset_path: ${task.dataset.dataset_path}
+    shape_meta: ${task.shape_meta}
+    n_train: 6
+    n_train_vis: 2
+    train_start_idx: 0
+    n_test: 40
+    n_test_vis: 2
+    test_start_seed: 100000
+    max_steps: 500
+    n_obs_steps: ${n_obs_steps}
+    n_action_steps: ${n_action_steps}
+    render_obs_key: agentview_image
+    fps: 10
+    crf: 22
+    past_action: false
+    abs_action: true
+    tqdm_interval_sec: 1.0
+    n_envs: 28
+
+# Match experiment_configs/square/transformer_square.yaml's training and
+# rollout-selection protocol. Batch/workers remain LTE-specific in the base.
+training:
+  num_epochs: 3500
+  lr_warmup_steps: 1000
+  rollout_every: 100
+  checkpoint_every: 100
+  val_every: 1
+  sample_every: 5

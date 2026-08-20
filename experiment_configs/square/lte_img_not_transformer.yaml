@@ -1,0 +1,53 @@
+# @package _global_
+defaults:
+  - /square/lte_img_not
+  - _self_
+
+# Short-context transformer decoder; LTE supplies the long causal history.
+_target_: diffusion_policy.workspace.train_diffusion_transformer_hybrid_workspace.TrainDiffusionTransformerHybridWorkspace
+
+task:
+  lte_horizon: 32
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_lte_image_policy.DiffusionTransformerLTEImagePolicy
+  shape_meta: ${shape_meta}
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  temporal_image_hdf5_path: ${task.dataset.dataset_path}
+  temporal_rgb_key: ${task.lte_temporal_rgb_key}
+  temporal_latent_dim: 32
+  temporal_hidden_dim: 128
+  temporal_recurrent: true
+  temporal_subsample_frames: ${temporal_subsample_frames}
+  temporal_encode_chunk_size: 256
+  use_embed_if_present: false
+  crop_shape: [76, 76]
+  obs_encoder_group_norm: true
+  eval_fixed_crop: true
+  n_layer: 8
+  n_cond_layers: 0
+  n_head: 4
+  n_emb: 256
+  p_drop_emb: 0.0
+  p_drop_attn: 0.3
+  causal_attn: true
+  time_as_cond: true
+  obs_as_cond: true
+  pred_action_steps_only: false
+  image_pool_class: SpatialSoftmax
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+
+optimizer:
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.95]
+  transformer_weight_decay: 1.0e-3
+  obs_encoder_weight_decay: 1.0e-6

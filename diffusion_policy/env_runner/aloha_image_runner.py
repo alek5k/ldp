@@ -256,6 +256,12 @@ class AlohaImageRunner(BaseImageRunner):
             obs = env.reset()
             past_action = None
             policy.reset()
+            if hasattr(policy, "advance_temporal_state_from_observation"):
+                policy.advance_temporal_state_from_observation({
+                    policy.temporal_rgb_key: torch.from_numpy(
+                        obs[policy.temporal_rgb_key]
+                    ).to(device)
+                })
 
             env_name = self.env_meta['env_name']
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval {env_name}Image {chunk_idx+1}/{n_chunks}", 
@@ -294,6 +300,12 @@ class AlohaImageRunner(BaseImageRunner):
                 env_action = action
 
                 obs, reward, done, info = env.step(env_action)
+                if hasattr(policy, "advance_temporal_state_from_observation"):
+                    policy.advance_temporal_state_from_observation({
+                        policy.temporal_rgb_key: torch.from_numpy(
+                            obs[policy.temporal_rgb_key]
+                        ).to(device)
+                    })
                 done = np.all(done)
                 past_action = action
 
@@ -338,4 +350,3 @@ class AlohaImageRunner(BaseImageRunner):
             log_data[name] = value
 
         return log_data
-

@@ -23,7 +23,9 @@ class TemporalZarrImageDataset(BaseImageDataset):
 
     Images are stored channel-first as either float images in [0, 1] (the
     native recorder format) or uint8 images.  The policy-facing observation
-    names are standardised to ``image`` and ``agent_pose``.
+    names are standardised to ``image`` and ``agent_pose``.  LTE-IMG-NoT does
+    not require a recorded ``step_count`` field: causal prefixes come directly
+    from ``meta/episode_ends``.
     """
 
     def __init__(

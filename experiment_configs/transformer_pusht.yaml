@@ -33,7 +33,7 @@ logging:
   id: null
   mode: online
   name: 2023.01.16-20.20.50_train_diffusion_transformer_hybrid_pusht_image
-  project: diffusion_policy_debug
+  project: ldp_temporal_diffusion_policy
   resume: true
   tags:
   - train_diffusion_transformer_hybrid

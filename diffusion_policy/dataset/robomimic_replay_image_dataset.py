@@ -52,7 +52,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             subsampling_method="uniform",
             use_cache=False,
             seed=42,
-            val_ratio=0.0
+            val_ratio=0.0,
+            return_temporal_history=False,
         ):
         from_convention = None
         if rot_rep_orig == "euler_angles":
@@ -160,6 +161,13 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.use_legacy_normalizer = use_legacy_normalizer
+        self.return_temporal_history = return_temporal_history
+        episode_ends = np.asarray(self.replay_buffer.episode_ends[:], dtype=np.int64)
+        self.temporal_episode_ends = episode_ends
+        self.temporal_episode_starts = np.concatenate(([0], episode_ends[:-1]))
+        self.max_episode_length = int(
+            np.max(self.temporal_episode_ends - self.temporal_episode_starts)
+        )
 
 
         actions = np.array(self.replay_buffer["action"])[None]
@@ -225,6 +233,19 @@ class RobomimicReplayImageDataset(BaseImageDataset):
     def __len__(self):
         return len(self.sampler)
 
+    def _observation_positions(self):
+        """Positions in a sampled sequence retained as policy observations."""
+        past_length = self.n_obs_steps * self.subsample_frames
+        if self.subsampling_method == "uniform":
+            return np.arange(self.subsample_frames - 1, past_length, self.subsample_frames)
+        if self.subsampling_method == "mixed":
+            sparse = np.arange(self.subsample_frames - 1, past_length, self.subsample_frames)
+            sparse = sparse[-floor(self.n_obs_steps / 2):]
+            dense = np.arange(past_length - self.subsample_frames, past_length)
+            dense = dense[-ceil(self.n_obs_steps / 2):]
+            return np.concatenate([sparse, dense])
+        raise NotImplementedError
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
         data = self.sampler.sample_sequence(idx)
@@ -288,6 +309,32 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             'obs': dict_apply(obs_dict, torch.from_numpy),
             'action': torch.from_numpy(data['action'].astype(np.float32))
         }
+        if self.return_temporal_history:
+            # Provide a complete episode prefix as cheap global indices.  The
+            # LTE policy reads the selected camera directly from the source
+            # HDF5 file in bounded chunks, avoiding multi-GB worker payloads.
+            buffer_start, _, sample_start, sample_end = self.sampler.indices[idx]
+            positions = self._observation_positions()
+            source_indices = buffer_start + np.clip(
+                positions, sample_start, sample_end - 1
+            ) - sample_start
+            last_observation = int(source_indices[-1])
+            episode_id = int(np.searchsorted(
+                self.temporal_episode_ends, last_observation, side="right"
+            ))
+            episode_start = int(self.temporal_episode_starts[episode_id])
+            history_length = last_observation - episode_start + 1
+            history_indices = np.zeros(self.max_episode_length, dtype=np.int64)
+            history_indices[:history_length] = np.arange(
+                episode_start, last_observation + 1, dtype=np.int64
+            )
+            torch_data['temporal_history_image_indices'] = torch.from_numpy(history_indices)
+            torch_data['temporal_history_mask'] = torch.from_numpy(
+                np.arange(self.max_episode_length) < history_length
+            )
+            torch_data['temporal_obs_history_indices'] = torch.from_numpy(
+                (source_indices - episode_start).astype(np.int64)
+            )
         return torch_data
 
 

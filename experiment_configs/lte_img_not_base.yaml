@@ -1,0 +1,130 @@
+# Shared LTE-IMG-NoT training settings. Task-specific, paper-comparable
+# datasets and rollout settings live in experiment_configs/{task}/lte_img_not.yaml.
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+
+name: train_diffusion_unet_lte_robomimic_image
+exp_name: lte_img_not
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+horizon: ${task.lte_horizon}
+n_obs_steps: ${task.lte_n_obs_steps}
+n_action_steps: ${task.lte_n_action_steps}
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+temporal_subsample_frames: 1
+past_action_visible: false
+obs_as_global_cond: true
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_lte_image_policy.DiffusionUnetLTEImagePolicy
+  shape_meta: ${shape_meta}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    variance_type: fixed_small
+    clip_sample: true
+    prediction_type: epsilon
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape: null
+    crop_shape: null
+    random_crop: false
+    use_group_norm: true
+    share_rgb_model: false
+    imagenet_norm: false
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  temporal_image_hdf5_path: ${task.dataset.dataset_path}
+  temporal_rgb_key: ${task.lte_temporal_rgb_key}
+  temporal_latent_dim: 32
+  temporal_hidden_dim: 128
+  temporal_recurrent: true
+  temporal_subsample_frames: ${temporal_subsample_frames}
+  temporal_encode_chunk_size: 256
+  num_inference_steps: 100
+  obs_as_global_cond: ${obs_as_global_cond}
+  diffusion_step_embed_dim: 256
+  down_dims: [256, 512, 1024]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 16
+  num_workers: 0
+  shuffle: true
+  pin_memory: true
+  persistent_workers: false
+
+val_dataloader:
+  batch_size: 16
+  num_workers: 0
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 200
+  gradient_accumulate_every: 1
+  use_ema: true
+  freeze_encoder: false
+  # Task-specific experiment files override these paper-training controls.
+  rollout_every: 100
+  checkpoint_every: 50
+  val_every: 10
+  sample_every: 10
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: ldp_temporal_diffusion_policy
+  resume: true
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 50
+    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
+  save_last_ckpt: true
+  save_last_snapshot: false
+
+hydra:
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}

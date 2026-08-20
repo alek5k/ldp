@@ -85,13 +85,17 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples,
     if num_inference_steps is not None:
         policy.num_inference_steps = num_inference_steps
 
+    if zarr_path is not None and "temporal_image_runner" not in cfg.task.env_runner._target_:
+        raise click.UsageError(
+            "--zarr_path requires TemporalImageRunner")
+
     if any(value is not None for value in
-           (zarr_path, n_test, n_test_vis, test_start_seed, max_steps,
+           (zarr_path, n_test, n_train, n_test_vis, test_start_seed, max_steps,
             n_action_steps)):
-        if "temporal_image_runner" not in cfg.task.env_runner._target_:
-            raise click.UsageError(
-                "--zarr_path and temporal episode overrides require TemporalImageRunner")
         with open_dict(cfg):
+            # All image runners accept these rollout controls. Zarr recording
+            # remains exclusive to TemporalImageRunner, which supplies its
+            # extra zarr_path and zarr_mode constructor arguments.
             if zarr_path is not None:
                 cfg.task.env_runner.zarr_path = zarr_path
                 cfg.task.env_runner.zarr_mode = 'w'

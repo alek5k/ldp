@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Dict
 
+import h5py
 import numpy as np
 import torch
 import torch.nn as nn
@@ -47,6 +48,8 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         n_action_steps: int,
         n_obs_steps: int,
         temporal_image_zarr_path: str | None = None,
+        temporal_image_hdf5_path: str | None = None,
+        temporal_rgb_key: str | None = None,
         temporal_latent_dim: int = 32,
         temporal_hidden_dim: int = 128,
         temporal_recurrent: bool = True,
@@ -68,7 +71,9 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         if temporal_subsample_frames < 1:
             raise ValueError("temporal_subsample_frames must be at least one")
         self.obs_encoder = obs_encoder
-        self.rgb_key = self._single_rgb_key(shape_meta)
+        self.temporal_rgb_key = self._resolve_temporal_rgb_key(
+            shape_meta, temporal_rgb_key
+        )
         self.image_embedding_dim = self._rgb_feature_dim()
         self.temporal_encoder = ImageNoTimeTemporalEncoder(
             image_embedding_dim=self.image_embedding_dim,
@@ -86,7 +91,10 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         self.temporal_subsample_frames = temporal_subsample_frames
         self.temporal_encode_chunk_size = temporal_encode_chunk_size
         self.temporal_image_zarr_path = temporal_image_zarr_path
+        self.temporal_image_hdf5_path = temporal_image_hdf5_path
         self._temporal_replay_buffer = None
+        self._temporal_hdf5_file = None
+        self._temporal_hdf5_episode_ends = None
         self._temporal_latent_history: list[torch.Tensor] = []
 
         condition_feature_dim = self.obs_feature_dim + temporal_latent_dim
@@ -121,36 +129,77 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         )
 
     @staticmethod
-    def _single_rgb_key(shape_meta: dict) -> str:
+    def _resolve_temporal_rgb_key(shape_meta: dict, configured_key: str | None) -> str:
         keys = [
             key for key, value in shape_meta["obs"].items()
             if value.get("type", "low_dim") == "rgb"
         ]
+        if configured_key is not None:
+            if configured_key not in keys:
+                raise ValueError(f"temporal_rgb_key '{configured_key}' is not an RGB observation")
+            return configured_key
         if len(keys) != 1:
-            raise ValueError("LTE-IMG-NoT currently requires exactly one RGB observation")
+            raise ValueError(
+                "temporal_rgb_key is required when an environment has multiple RGB observations"
+            )
         return keys[0]
 
     def _rgb_model(self):
         return (
             self.obs_encoder.key_model_map["rgb"]
             if self.obs_encoder.share_rgb_model
-            else self.obs_encoder.key_model_map[self.rgb_key]
+            else self.obs_encoder.key_model_map[self.temporal_rgb_key]
         )
 
     def _rgb_feature_dim(self) -> int:
-        shape = self.obs_encoder.key_shape_map[self.rgb_key]
+        shape = self.obs_encoder.key_shape_map[self.temporal_rgb_key]
         example = torch.zeros((1,) + shape, dtype=self.dtype, device=self.device)
         with torch.no_grad():
-            return int(self._rgb_model()(self.obs_encoder.key_transform_map[self.rgb_key](example)).shape[-1])
+            return int(self._rgb_model()(self.obs_encoder.key_transform_map[self.temporal_rgb_key](example)).shape[-1])
 
     def _encode_temporal_images(self, images: torch.Tensor) -> torch.Tensor:
         """Return the ResNet feature used as LTE's image-only input."""
         if images.ndim != 4:
             raise ValueError("temporal images must have shape (B, C, H, W)")
-        image = self.obs_encoder.key_transform_map[self.rgb_key](images)
+        image = self.obs_encoder.key_transform_map[self.temporal_rgb_key](images)
         return self._rgb_model()(image)
 
+    def _open_temporal_hdf5(self):
+        if self.temporal_image_hdf5_path is None:
+            raise RuntimeError("temporal_image_hdf5_path is required for HDF5 LTE batches")
+        if self._temporal_hdf5_file is None:
+            self._temporal_hdf5_file = h5py.File(self.temporal_image_hdf5_path, "r")
+            demos = self._temporal_hdf5_file["data"]
+            lengths = []
+            for index in range(len(demos)):
+                demo = demos[f"demo_{index}"]
+                action_key = "action" if "action" in demo else "actions"
+                lengths.append(int(demo[action_key].shape[0]))
+            self._temporal_hdf5_episode_ends = np.cumsum(lengths, dtype=np.int64)
+        return self._temporal_hdf5_file
+
+    def _read_hdf5_history_images(self, indices: torch.Tensor) -> torch.Tensor:
+        file = self._open_temporal_hdf5()
+        requested = indices.detach().cpu().numpy().astype(np.int64, copy=False)
+        unique, inverse = np.unique(requested, return_inverse=True)
+        episode_ids = np.searchsorted(self._temporal_hdf5_episode_ends, unique, side="right")
+        episode_starts = np.concatenate(([0], self._temporal_hdf5_episode_ends[:-1]))
+        image_by_unique = [None] * len(unique)
+        for episode_id in np.unique(episode_ids):
+            positions = np.flatnonzero(episode_ids == episode_id)
+            local_indices = unique[positions] - episode_starts[episode_id]
+            images = np.asarray(
+                file[f"data/demo_{episode_id}/obs/{self.temporal_rgb_key}"][local_indices]
+            )
+            for position, image in zip(positions, images):
+                image_by_unique[position] = image
+        image = np.asarray(image_by_unique, dtype=np.uint8)[inverse]
+        image = np.moveaxis(image, -1, 1).astype(np.float32) / 255.0
+        return torch.from_numpy(np.ascontiguousarray(image)).to(self.device)
+
     def _read_history_images(self, indices: torch.Tensor) -> torch.Tensor:
+        if self.temporal_image_hdf5_path is not None:
+            return self._read_hdf5_history_images(indices)
         if self.temporal_image_zarr_path is None:
             raise RuntimeError(
                 "temporal_image_zarr_path is required for LTE training batches"
@@ -174,7 +223,7 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
             observation_indices = batch["temporal_obs_history_indices"]
         except KeyError as exc:
             raise KeyError(
-                "LTE batches require TemporalZarrImageDataset(return_temporal_history=true)"
+                "LTE batches require a dataset with return_temporal_history=true"
             ) from exc
         batch_size, history_len = indices.shape
         valid_indices = indices[valid_mask]
@@ -201,14 +250,14 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         This is useful for offline sample visualisation.  Real evaluations use
         ``advance_temporal_state`` and therefore retain the full prefix.
         """
-        images = nobs[self.rgb_key][:, :self.n_obs_steps]
+        images = nobs[self.temporal_rgb_key][:, :self.n_obs_steps]
         batch_size, steps = images.shape[:2]
         embeddings = self._encode_temporal_images(images.reshape(-1, *images.shape[2:]))
         embeddings = embeddings.reshape(batch_size, steps, -1)
         return self.temporal_encoder.encode_history(embeddings)
 
     def _online_temporal_latents(self, nobs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        batch_size = nobs[self.rgb_key].shape[0]
+        batch_size = nobs[self.temporal_rgb_key].shape[0]
         if not self._temporal_latent_history:
             return self._fallback_temporal_latents(nobs)
         latest = self._temporal_latent_history[-1]
@@ -240,6 +289,14 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
         previous = self._temporal_latent_history[-1] if self._temporal_latent_history else None
         self._temporal_latent_history.append(self.temporal_encoder(embedding, previous))
 
+    @torch.no_grad()
+    def advance_temporal_state_from_observation(self, observation: Dict[str, torch.Tensor]):
+        """Advance from a runner observation dictionary, using the LTE camera."""
+        image = observation[self.temporal_rgb_key]
+        if image.ndim == 5:
+            image = image[:, -1]
+        self.advance_temporal_state(image)
+
     def conditional_sample(self, condition_data, condition_mask,
                            local_cond=None, global_cond=None, generator=None, **kwargs):
         trajectory = torch.randn(
@@ -269,7 +326,7 @@ class DiffusionUnetLTEImagePolicy(BaseImagePolicy):
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         nobs = self.normalizer.normalize(obs_dict)
-        batch_size = nobs[self.rgb_key].shape[0]
+        batch_size = nobs[self.temporal_rgb_key].shape[0]
         temporal_latents = self._online_temporal_latents(nobs)
         condition_features = self._condition_features(nobs, temporal_latents)
         if self.obs_as_global_cond:
