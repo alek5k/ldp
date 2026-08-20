@@ -37,6 +37,7 @@ class TemporalZarrImageDataset(BaseImageDataset):
         seed: int = 42,
         val_ratio: float = 0.02,
         max_train_episodes=None,
+        return_temporal_history: bool = False,
     ):
         super().__init__()
         # Keep the (large) image arrays in their on-disk Zarr store.  Copying
@@ -79,6 +80,13 @@ class TemporalZarrImageDataset(BaseImageDataset):
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.return_temporal_history = return_temporal_history
+        episode_ends = np.asarray(self.replay_buffer.episode_ends[:], dtype=np.int64)
+        self.temporal_episode_ends = episode_ends
+        self.temporal_episode_starts = np.concatenate(([0], episode_ends[:-1]))
+        self.max_episode_length = int(
+            np.max(self.temporal_episode_ends - self.temporal_episode_starts)
+        )
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -142,4 +150,30 @@ class TemporalZarrImageDataset(BaseImageDataset):
             },
             "action": action.astype(np.float32),
         }
+        if self.return_temporal_history:
+            # A recurrent temporal encoder must start at the genuine episode
+            # boundary, rather than at the left edge of this sampled window.
+            # Keep absolute image indices lightweight; the policy reads and
+            # encodes them in bounded chunks in the training process.
+            buffer_start, _, sample_start, sample_end = self.sampler.indices[idx]
+            source_indices = buffer_start + np.clip(
+                observation_indices, sample_start, sample_end - 1
+            ) - sample_start
+            last_observation = int(source_indices[-1])
+            episode_id = int(np.searchsorted(
+                self.temporal_episode_ends, last_observation, side="right"
+            ))
+            episode_start = int(self.temporal_episode_starts[episode_id])
+            history_length = last_observation - episode_start + 1
+            history_indices = np.zeros(self.max_episode_length, dtype=np.int64)
+            history_indices[:history_length] = np.arange(
+                episode_start, last_observation + 1, dtype=np.int64
+            )
+            data["temporal_history_image_indices"] = history_indices
+            data["temporal_history_mask"] = (
+                np.arange(self.max_episode_length) < history_length
+            )
+            data["temporal_obs_history_indices"] = (
+                source_indices - episode_start
+            ).astype(np.int64)
         return dict_apply(data, torch.from_numpy)

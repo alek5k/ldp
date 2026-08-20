@@ -138,6 +138,13 @@ class TemporalImageRunner(BaseImageRunner):
             done = False
             steps = 0
             policy.reset()
+            # LTE-IMG-NoT is stateful between replans.  Feature extraction is
+            # deliberately done once for every real observation, not only once
+            # for each predicted action chunk.
+            if hasattr(policy, "advance_temporal_state"):
+                policy.advance_temporal_state(
+                    torch.from_numpy(np.asarray(obs["full_image"])).to(policy.device)
+                )
             with tqdm(total=self.max_steps, desc=f"{prefix}seed {seed}", unit="step") as pbar:
                 while not done and steps < self.max_steps:
                     np_obs = self._policy_obs(history)
@@ -159,6 +166,10 @@ class TemporalImageRunner(BaseImageRunner):
                                 recorder.start(str(video_path))
                             recorder.write_frame(self._video_frame(obs))
                         obs, reward, done, _ = env.step(self._env_action(action.copy()))
+                        if hasattr(policy, "advance_temporal_state"):
+                            policy.advance_temporal_state(
+                                torch.from_numpy(np.asarray(obs["full_image"])).to(policy.device)
+                            )
                         if self.replay_buffer is not None:
                             # Match TemporalDiffusionPolicy inference: save the
                             # pre-action observation and the policy action as one

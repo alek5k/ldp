@@ -92,3 +92,21 @@ The source datasets are:
 
 - `/mnt/shared/TemporalDiffusionPolicy/data/demonstration/wait_at_goal_dataset_v4.zarr`
 - `/mnt/shared/TemporalDiffusionPolicy/data/demonstration/lift_qa_v2.zarr`
+
+## LTE-IMG-NoT
+
+`train_temporal_lte_img_not.sh` trains the migrated learned temporal encoder
+against these native environments.  It preserves the original method's
+causal state update: a detached ResNet image feature and the previous latent
+produce the next latent, with no timestep input.  Training obtains the full
+episode prefix from lightweight Zarr frame indices; rollout updates the state
+after every executed action, including actions between replans.
+
+```bash
+cd ~/Repos/ldp && conda activate robodiff-lh-5090
+GPU=0 CUDA_VISIBLE_DEVICES=$GPU ./train_temporal_lte_img_not.sh waitatgoal data/outputs/waitatgoal_lte_img_not
+CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh waitatgoal data/outputs/waitatgoal_lte_img_not/checkpoints/latest.ckpt data/inference/waitatgoal_lte_img_not_eval
+```
+
+The default batch size is 16 because every batch encodes causal image prefixes
+online.  Change `dataloader.batch_size` only after checking GPU memory.
