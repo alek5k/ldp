@@ -11,7 +11,7 @@ task:
   lte_temporal_rgb_key: agentview_image
   lte_horizon: 16
   lte_n_obs_steps: 2
-  lte_n_action_steps: 1
+  lte_n_action_steps: 8
   shape_meta:
     obs:
       agentview_image: {shape: [3, 84, 84], type: rgb}
@@ -31,7 +31,11 @@ task:
     abs_action: true
     rotation_rep: rotation_6d
     use_legacy_normalizer: false
-    use_cache: true
+    # RGB already loads directly from HDF5 into RAM. Avoid the separate
+    # low-dimensional ZIP cache, whose failed creation previously obscured the
+    # real exception with a misleading FileNotFoundError.
+    use_cache: false
+    cache_images_in_memory: true
     seed: 42
     val_ratio: 0.02
     return_temporal_history: true
@@ -62,6 +66,6 @@ training:
   num_epochs: 3500
   lr_warmup_steps: 1000
   rollout_every: 100
-  checkpoint_every: 100
+  checkpoint_every: 50
   val_every: 1
   sample_every: 5

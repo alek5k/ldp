@@ -1,0 +1,73 @@
+# @package _global_
+defaults:
+  - /lte_img_not_base
+  - _self_
+
+# Native LiftQA version of LTE-IMG-NoT. It uses the same ResNet -> recurrent
+# temporal encoder as WaitAtGoal, with LiftQA's 3-D pose/action spaces.
+task:
+  name: liftqa_image
+  lte_temporal_rgb_key: image
+  lte_horizon: 16
+  lte_n_obs_steps: 2
+  lte_n_action_steps: 8
+  shape_meta:
+    obs:
+      image: {shape: [3, 144, 144], type: rgb}
+      agent_pose: {shape: [3], type: low_dim}
+    action: {shape: [3]}
+  dataset:
+    _target_: diffusion_policy.dataset.temporal_zarr_image_dataset.TemporalZarrImageDataset
+    zarr_path: /mnt/shared/TemporalDiffusionPolicy/data/demonstration/lift_qa_v2.zarr
+    horizon: ${horizon}
+    n_obs_steps: ${dataset_obs_steps}
+    subsample_frames: 1
+    pad_before: ${eval:'${n_obs_steps}-1'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    seed: 42
+    val_ratio: 0.2
+    return_temporal_history: true
+    cache_images_in_memory: true
+  env_runner:
+    _target_: diffusion_policy.env_runner.temporal_image_runner.TemporalImageRunner
+    env_name: liftqa
+    n_train: 2
+    n_train_vis: 1
+    train_start_seed: 0
+    n_test: 10
+    n_test_vis: 2
+    test_start_seed: 10000
+    max_steps: 400
+    n_obs_steps: ${n_obs_steps}
+    n_action_steps: ${n_action_steps}
+    subsample_frames: 1
+    fps: 10
+    render_size: 144
+    constrain_motion: true
+
+policy:
+  temporal_image_hdf5_path: null
+  temporal_image_zarr_path: ${task.dataset.zarr_path}
+
+dataloader:
+  batch_size: 64
+
+val_dataloader:
+  batch_size: 64
+
+training:
+  num_epochs: 200
+  rollout_every: 50
+  checkpoint_every: 50
+  val_every: 10
+  sample_every: 10
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 5
+    format_str: epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt
+
+logging:
+  log_every_n_steps: null

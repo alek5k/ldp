@@ -45,11 +45,32 @@ policy:
   n_obs_steps: ${n_obs_steps}
   temporal_image_hdf5_path: ${task.dataset.dataset_path}
   temporal_rgb_key: ${task.lte_temporal_rgb_key}
+  # Match the original LTE data path by caching the selected camera once in RAM.
+  temporal_image_cache_in_memory: true
   temporal_latent_dim: 32
   temporal_hidden_dim: 128
+  temporal_num_hidden_layers: 1
   temporal_recurrent: true
   temporal_subsample_frames: ${temporal_subsample_frames}
   temporal_encode_chunk_size: 256
+  # Optional detached full-dataset ResNet cache for LTE causal prefixes.
+  # The CLI can enable it and choose the refresh schedule per experiment.
+  temporal_embedding_cache_enabled: false
+  temporal_embedding_cache_start_epoch: 5
+  temporal_embedding_cache_warmup_epochs: 20
+  temporal_embedding_cache_refresh_epochs: 5
+  # Training-only causal reconstruction objective from the original LTE-IMG-NoT
+  # implementation. It samples 16 stratified locations in every selected
+  # latent's full episode prefix and reconstructs the detached ResNet feature.
+  history_reconstruction:
+    enabled: true
+    lambda_history: 1.0
+    num_history_queries: 16
+    num_hidden_layers: 1
+    hidden_dim: 128
+    # Match the original LTE-IMG-NoT decoder's normalized [-1, 1] lag scale.
+    # Raw frame lags are still used to interpolate reconstruction targets.
+    normalize_query_lags: true
   num_inference_steps: 100
   obs_as_global_cond: ${obs_as_global_cond}
   diffusion_step_embed_dim: 256
@@ -67,15 +88,15 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 16
-  num_workers: 0
+  batch_size: 64
+  num_workers: 8
   shuffle: true
   pin_memory: true
   persistent_workers: false
 
 val_dataloader:
-  batch_size: 16
-  num_workers: 0
+  batch_size: 64
+  num_workers: 8
   shuffle: false
   pin_memory: true
   persistent_workers: false
@@ -111,6 +132,9 @@ logging:
   project: ldp_temporal_diffusion_policy
   resume: true
   mode: online
+  # Most image experiments retain per-step curves. Native WaitAtGoal overrides
+  # this to epoch-only logging to match TemporalDiffusionPolicy's trainer.
+  log_every_n_steps: 1
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "${exp_name}"]
   id: null

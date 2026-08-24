@@ -85,6 +85,12 @@ class MultiStepWrapper(gym.Wrapper):
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda : deque(maxlen=n_obs_steps+1))
+        # Off by default. Image runners enable this only for explicit Zarr
+        # exports, to retain each base-environment transition rather than just
+        # the stacked observation seen at replanning boundaries.
+        self._record_trajectory = False
+        self._recorded_episode = None
+        self._record_action_override = None
     
     def reset(self):
         """Resets the environment using kwargs."""
@@ -97,6 +103,14 @@ class MultiStepWrapper(gym.Wrapper):
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda : deque(maxlen=self.n_obs_steps+1))
+        if self._record_trajectory:
+            self._recorded_episode = {
+                "obs": {key: [] for key in obs},
+                "action": [],
+                "reward": [],
+                "done": [],
+            }
+        self._record_action_override = None
 
         obs = self._get_obs(self.n_obs_steps)
         return obs
@@ -105,11 +119,28 @@ class MultiStepWrapper(gym.Wrapper):
         """
         actions: (n_action_steps,) + action_shape
         """
-        for act in action:
+        for action_index, act in enumerate(action):
             if len(self.done) > 0 and self.done[-1]:
                 # termination
                 break
+            if self._record_trajectory:
+                if self._recorded_episode is None:
+                    raise RuntimeError("Recording was enabled after reset.")
+                for key, value in self.obs[-1].items():
+                    self._recorded_episode["obs"][key].append(
+                        np.asarray(value).copy())
+                recorded_action = act
+                if self._record_action_override is not None:
+                    recorded_action = self._record_action_override[action_index]
             observation, reward, done, info = super().step(act)
+
+            if self._record_trajectory:
+                self._recorded_episode["action"].append(
+                    np.asarray(recorded_action).copy())
+                self._recorded_episode["reward"].append(
+                    np.asarray(reward, dtype=np.float32))
+                self._recorded_episode["done"].append(
+                    np.asarray(done, dtype=np.bool_))
 
             self.obs.append(observation)
             self.reward.append(reward)
@@ -125,6 +156,37 @@ class MultiStepWrapper(gym.Wrapper):
         done = aggregate(self.done, 'max')
         info = dict_take_last_n(self.info, self.n_obs_steps)
         return observation, reward, done, info
+
+    def start_recording(self):
+        """Begin raw-step capture on the next reset."""
+        self._record_trajectory = True
+        self._recorded_episode = None
+        self._record_action_override = None
+
+    def set_recording_actions(self, action):
+        """Save policy-space actions when environment controls are transformed."""
+        if not self._record_trajectory:
+            return
+        action = np.asarray(action)
+        if action.ndim < 1:
+            raise ValueError("Recorded action chunk must have a time dimension.")
+        self._record_action_override = action
+
+    def get_recorded_episode(self, clear=True):
+        """Return a ReplayBuffer-compatible raw-step episode."""
+        episode = self._recorded_episode
+        if episode is None or not episode["action"]:
+            return None
+        result = {key: np.stack(values) for key, values in episode["obs"].items()}
+        result.update({
+            "action": np.stack(episode["action"]),
+            "reward": np.asarray(episode["reward"], dtype=np.float32),
+            "done": np.asarray(episode["done"], dtype=np.bool_),
+        })
+        if clear:
+            self._recorded_episode = None
+        return result
+
 
     def _get_obs(self, n_steps=1):
         """

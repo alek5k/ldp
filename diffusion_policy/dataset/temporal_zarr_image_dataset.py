@@ -14,6 +14,7 @@ from diffusion_policy.common.normalize_util import get_image_range_normalizer
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.sampler import SequenceSampler, get_val_mask
+from diffusion_policy.common.zarr_image_cache import get_zarr_array_cache
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 
@@ -40,6 +41,7 @@ class TemporalZarrImageDataset(BaseImageDataset):
         val_ratio: float = 0.02,
         max_train_episodes=None,
         return_temporal_history: bool = False,
+        cache_images_in_memory: bool = False,
     ):
         super().__init__()
         # Keep the (large) image arrays in their on-disk Zarr store.  Copying
@@ -83,6 +85,11 @@ class TemporalZarrImageDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.return_temporal_history = return_temporal_history
+        self.cache_images_in_memory = bool(cache_images_in_memory)
+        self._image_cache = (
+            get_zarr_array_cache(zarr_path, "full_image", self.replay_buffer)
+            if self.cache_images_in_memory else None
+        )
         episode_ends = np.asarray(self.replay_buffer.episode_ends[:], dtype=np.int64)
         self.temporal_episode_ends = episode_ends
         self.temporal_episode_starts = np.concatenate(([0], episode_ends[:-1]))
@@ -132,6 +139,8 @@ class TemporalZarrImageDataset(BaseImageDataset):
         buffer_start, buffer_end, sample_start, sample_end = self.sampler.indices[idx]
         clipped = np.clip(sequence_indices, sample_start, sample_end - 1)
         source_indices = buffer_start + clipped - sample_start
+        if self._image_cache is not None:
+            return np.asarray(self._image_cache[source_indices])
         image_array = self.replay_buffer["full_image"]
         return np.asarray(image_array.oindex[source_indices])
 

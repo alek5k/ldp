@@ -8,9 +8,7 @@ defaults:
 _target_: diffusion_policy.workspace.train_diffusion_transformer_hybrid_workspace.TrainDiffusionTransformerHybridWorkspace
 
 task:
-  # Match the released transformer's 32-token action horizon while retaining
-  # LTE's requested two-frame decoder window and eight-action execution chunk.
-  lte_horizon: 32
+  lte_horizon: 16
 
 policy:
   _target_: diffusion_policy.policy.diffusion_transformer_lte_image_policy.DiffusionTransformerLTEImagePolicy

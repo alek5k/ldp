@@ -18,9 +18,9 @@ class TemporalImageRunner(BaseImageRunner):
     """Run native temporal environments and persist policy trajectories.
 
     Unlike the Robomimic runners, this is deliberately single-process: it
-    keeps Pygame and MuJoCo rendering predictable and writes an ``.npz`` plus
-    an MP4 for each requested visual rollout.  The NPZ keeps timing values used
-    by the TemporalDiffusionPolicy analysis scripts.
+    keeps Pygame and MuJoCo rendering predictable. It can optionally write an
+    ``.npz`` per episode for legacy timing analysis, but Zarr is the default
+    rollout record to avoid duplicating large image observations.
     """
 
     def __init__(
@@ -42,6 +42,7 @@ class TemporalImageRunner(BaseImageRunner):
         constrain_motion: bool = True,
         zarr_path: str = None,
         zarr_mode: str = "w",
+        save_npz: bool = False,
         tqdm_interval_sec: float = 1.0,
         **kwargs,
     ):
@@ -66,6 +67,7 @@ class TemporalImageRunner(BaseImageRunner):
             raise ValueError("zarr_mode must be 'w' (new store) or 'a' (append)")
         self.zarr_path = zarr_path
         self.zarr_mode = zarr_mode
+        self.save_npz = save_npz
         self.replay_buffer = None
 
     def _make_env(self, seed: int):
@@ -113,9 +115,10 @@ class TemporalImageRunner(BaseImageRunner):
     def _run_episode(self, policy, prefix: str, seed: int, save_video: bool):
         env = self._make_env(seed)
         media_dir = Path(self.output_dir) / "media"
-        rollout_dir = Path(self.output_dir) / "rollouts"
         media_dir.mkdir(parents=True, exist_ok=True)
-        rollout_dir.mkdir(parents=True, exist_ok=True)
+        rollout_dir = Path(self.output_dir) / "rollouts" if self.save_npz else None
+        if rollout_dir is not None:
+            rollout_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{prefix.rstrip('/')}_seed{seed}"
         video_path = media_dir / f"{stem}.mp4"
         recorder = None
@@ -129,10 +132,12 @@ class TemporalImageRunner(BaseImageRunner):
             obs = env.reset()
             raw_history_length = self.n_obs_steps * self.subsample_frames
             history = deque([obs] * raw_history_length, maxlen=raw_history_length)
-            trajectory: Dict[str, list] = {
-                "image": [], "agent_pose": [], "action": [], "reward": [],
-                "done": [], "wait_time": [], "step_count": [],
-            }
+            trajectory: Dict[str, list] | None = None
+            if self.save_npz:
+                trajectory = {
+                    "image": [], "agent_pose": [], "action": [], "reward": [],
+                    "done": [], "wait_time": [], "step_count": [],
+                }
             zarr_episode = []
             total_reward = 0.0
             done = False
@@ -156,11 +161,12 @@ class TemporalImageRunner(BaseImageRunner):
                         action_batch = policy.predict_action(torch_obs)["action"]
                     actions = action_batch[0].detach().cpu().numpy()
                     for action in actions:
-                        trajectory["image"].append(obs["full_image"])
-                        trajectory["agent_pose"].append(obs["agent_pose"])
-                        trajectory["action"].append(action.astype(np.float32))
-                        trajectory["wait_time"].append(np.float32(obs.get("wait_time", 0.0)))
-                        trajectory["step_count"].append(np.int64(obs.get("step_count", steps)))
+                        if trajectory is not None:
+                            trajectory["image"].append(obs["full_image"])
+                            trajectory["agent_pose"].append(obs["agent_pose"])
+                            trajectory["action"].append(action.astype(np.float32))
+                            trajectory["wait_time"].append(np.float32(obs.get("wait_time", 0.0)))
+                            trajectory["step_count"].append(np.int64(obs.get("step_count", steps)))
                         if recorder is not None:
                             if not recorder.is_ready():
                                 recorder.start(str(video_path))
@@ -184,8 +190,9 @@ class TemporalImageRunner(BaseImageRunner):
                             step_data["reward"] = np.asarray(reward, dtype=np.float32)
                             step_data["done"] = np.asarray(done, dtype=np.bool_)
                             zarr_episode.append(step_data)
-                        trajectory["reward"].append(np.float32(reward))
-                        trajectory["done"].append(bool(done))
+                        if trajectory is not None:
+                            trajectory["reward"].append(np.float32(reward))
+                            trajectory["done"].append(bool(done))
                         total_reward += float(reward)
                         history.append(obs)
                         steps += 1
@@ -194,10 +201,11 @@ class TemporalImageRunner(BaseImageRunner):
                             break
             if recorder is not None and recorder.is_ready():
                 recorder.stop()
-            np.savez_compressed(
-                rollout_dir / f"{stem}.npz",
-                **{key: np.asarray(value) for key, value in trajectory.items()},
-            )
+            if trajectory is not None:
+                np.savez_compressed(
+                    rollout_dir / f"{stem}.npz",
+                    **{key: np.asarray(value) for key, value in trajectory.items()},
+                )
             if self.replay_buffer is not None and zarr_episode:
                 self.replay_buffer.add_episode(
                     {key: np.stack([step[key] for step in zarr_episode])
@@ -224,11 +232,17 @@ class TemporalImageRunner(BaseImageRunner):
             ("train/", self.n_train, self.n_train_vis, self.train_start_seed),
             ("test/", self.n_test, self.n_test_vis, self.test_start_seed),
         ]
+        total_episodes = self.n_train + self.n_test
+        completed_episodes = 0
         for prefix, count, visual_count, start_seed in specs:
             for index in range(count):
                 seed = start_seed + index
                 score, video_path = self._run_episode(
                     policy, prefix, seed, save_video=index < visual_count)
+                completed_episodes += 1
+                print(
+                    f"EVAL_PROGRESS total={total_episodes} "
+                    f"completed={completed_episodes}")
                 scores[prefix].append(score)
                 log_data[f"{prefix}sim_max_reward_{seed}"] = score
                 if video_path is not None:

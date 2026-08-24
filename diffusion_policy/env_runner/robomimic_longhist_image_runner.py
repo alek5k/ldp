@@ -18,6 +18,10 @@ from diffusion_policy.model.common.rotation_transformer import RotationTransform
 from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
+from diffusion_policy.env_runner.rollout_zarr import (
+    append_recorded_episodes,
+    create_rollout_replay_buffer,
+)
 from diffusion_policy.env.robomimic.robomimic_image_wrapper import RobomimicImageWrapper
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.env_utils as EnvUtils
@@ -27,7 +31,34 @@ from hsic import batch_hsic
 import wandb
 from mlp_correlation import batch_mlp_corr
 
+
+def _configure_robomimic_render_device() -> None:
+    """Use a caller-selected EGL device instead of probing every GPU."""
+    configured_device = os.environ.get("ROBOMIMIC_RENDER_GPU_DEVICE")
+    if (
+        configured_device is None
+        and os.environ.get("CUDA_VISIBLE_DEVICES", "").isdigit()
+    ):
+        configured_device = os.environ["CUDA_VISIBLE_DEVICES"]
+    if configured_device is None:
+        return
+    try:
+        render_device = int(configured_device)
+    except ValueError as exc:
+        raise ValueError(
+            "ROBOMIMIC_RENDER_GPU_DEVICE must be a physical integer GPU index"
+        ) from exc
+
+    # EnvRobosuite imports egl_probe during construction and otherwise runs
+    # test_device for every physical GPU in each worker process. The launcher
+    # supplies a known working physical EGL device, so preserve Robomimic's
+    # interface while avoiding the repeated scan.
+    import egl_probe
+    egl_probe.get_available_devices = lambda: [render_device]
+
+
 def create_env(env_meta, shape_meta, enable_render=True):
+    _configure_robomimic_render_device()
     modality_mapping = collections.defaultdict(list)
     for key, attr in shape_meta['obs'].items():
         modality_mapping[attr.get('type', 'low_dim')].append(key)
@@ -154,6 +185,8 @@ class RobomimicImageRunner(BaseImageRunner):
             n_samples=1,
             perturbations=None,
             save_dir=None,
+            zarr_path=None,
+            zarr_mode='w',
         ):
         super().__init__(output_dir)
 
@@ -330,12 +363,18 @@ class RobomimicImageRunner(BaseImageRunner):
         self.rotation_transformer = rotation_transformer
         self.abs_action = abs_action
         self.tqdm_interval_sec = tqdm_interval_sec
+        self.zarr_path = zarr_path
+        self.zarr_mode = zarr_mode
 
     def run(self, policy: BaseImagePolicy):
         device = policy.device
         dtype = policy.dtype
         env = self.env
         normalizer = policy.normalizer
+        replay_buffer = None
+        if self.zarr_path is not None:
+            replay_buffer = create_rollout_replay_buffer(
+                self.zarr_path, self.zarr_mode)
         
         # plan for rollout
         n_envs = len(self.env_fns)
@@ -362,6 +401,8 @@ class RobomimicImageRunner(BaseImageRunner):
             # init envs
             env.call_each('run_dill_function', 
                 args_list=[(x,) for x in this_init_fns])
+            if replay_buffer is not None:
+                env.call('start_recording')
 
             # start rollout
             obs = env.reset()
@@ -454,6 +495,9 @@ class RobomimicImageRunner(BaseImageRunner):
                 
                 # step env
                 env_action = action
+                if replay_buffer is not None:
+                    env.call_each('set_recording_actions',
+                        args_list=[(x,) for x in action])
                 # deal with chunked actions
                 for i in range(env_action.shape[1]):
                     act_hist.append(env_action[:, i:i+1])
@@ -487,13 +531,24 @@ class RobomimicImageRunner(BaseImageRunner):
             res = batch_hsic(torch.from_numpy(all_actions).cuda())
             print("all actions shape", all_actions.shape)
             log_dict = {"hsic_pred_actions_full_traj_online_fixed":res.mean(), "mlp_corr_pred_actions_full_traj_online_fixed": batch_mlp_corr(all_actions)}
-            wandb.log(log_dict)
+            # Standalone ``eval.py`` intentionally does not initialise W&B.
+            # Keep this training diagnostic when a run exists, but never make
+            # evaluation depend on external logging.
+            if wandb.run is not None:
+                wandb.log(log_dict)
             print(log_dict)
             pbar.close()
+
+            if replay_buffer is not None:
+                append_recorded_episodes(
+                    replay_buffer,
+                    env.call('get_recorded_episode')[:this_n_active_envs],
+                )
 
             # collect data for this round
             all_video_paths[this_global_slice] = env.render()[this_local_slice]
             all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
+            print(f"EVAL_PROGRESS total={n_inits} completed={end}")
         # clear out video buffer
         _ = env.reset()
         

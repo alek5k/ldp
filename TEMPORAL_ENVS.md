@@ -104,7 +104,7 @@ after every executed action, including actions between replans.
 
 ```bash
 cd ~/Repos/ldp && conda activate robodiff-lh-5090
-GPU=0 CUDA_VISIBLE_DEVICES=$GPU ./train_temporal_lte_img_not.sh waitatgoal data/outputs/waitatgoal_lte_img_not
+GPU=0 CUDA_VISIBLE_DEVICES=$GPU ./train_lte_img_not.sh waitatgoal data/outputs/waitatgoal_lte_img_not
 CUDA_VISIBLE_DEVICES=$GPU ./eval_temporal_policy.sh waitatgoal data/outputs/waitatgoal_lte_img_not/checkpoints/latest.ckpt data/inference/waitatgoal_lte_img_not_eval
 ```
 
@@ -126,7 +126,9 @@ original single-ResNet-image temporal input:
 | `tool_hang` | `tool/lte_img_not_transformer.yaml` | Tool Hang PH, absolute actions | `sideview_image` |
 | `transport` | `transport/lte_img_not_transformer.yaml` | Transport MH, absolute actions | `shouldercamera0_image` |
 | `lh-aloha` | `aloha/lte_img_not_transformer.yaml` | long-horizon ALOHA | `top` |
-| `lh-square` | `longhist/lte_img_not_transformer.yaml` | long-horizon Square | `agentview_image` |
+| `lh-square` | `longhist/lte_img_not.yaml` (U-Net) | long-horizon Square | `agentview_image` |
+| `waitatgoal` | `waitatgoal/lte_img_not.yaml` (U-Net) | native WaitAtGoal Zarr dataset | `image` |
+| `liftqa` | `liftqa/lte_img_not.yaml` (U-Net) | native LiftQA Zarr dataset | `image` |
 
 ```bash
 cd ~/Repos/ldp && conda activate robodiff-lh-5090
@@ -135,16 +137,37 @@ CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh tool_hang data/outputs/tool_hang_l
 CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh transport data/outputs/transport_lte_img_not
 CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh lh-aloha data/outputs/lh_aloha_lte_img_not
 CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh lh-square data/outputs/lh_square_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh waitatgoal data/outputs/waitatgoal_lte_img_not
+CUDA_VISIBLE_DEVICES=0 ./train_lte_img_not.sh liftqa data/outputs/liftqa_lte_img_not
 ```
 
 The transformer decoder is the default. It receives two adjacent observations;
 LTE alone carries longer history, and no PTP past-action objective is used. Add
 the `-unet` suffix to any launcher task to select the original U-Net decoder.
 
+Every LTE image preset caches its policy images in host RAM. HDF5-backed tasks
+load every declared RGB camera directly into raw NumPy arrays at startup, so
+ordinary decoder observations do not repeatedly decode JPEG2000/Zarr chunks;
+native Zarr tasks cache their ``full_image`` array. This does not cache or
+freeze ResNet features, so the learning algorithm is unchanged. Ensure the
+machine has enough RAM: LH-Square's two raw 84×84 cameras require about 1.7
+GiB, plus the LTE primary-camera history cache.
+
+For Robomimic tasks, the launcher automatically sets
+`ROBOMIMIC_RENDER_GPU_DEVICE` to the same physical GPU named by a single-value
+`CUDA_VISIBLE_DEVICES`. This avoids an EGL probe of every physical GPU in every
+rollout worker. Set `ROBOMIMIC_RENDER_GPU_DEVICE` explicitly if you use a
+multi-GPU CUDA visibility mask.
+
 For interactive launch and evaluation in a detached `screen` session, run
-`python experiment_cli.py`. It offers `train`, `eval`, and `train+eval`; each
-mode asks for the number of sequential runs and assigns consecutive seeds
-starting at 42 by default.
+`python experiment_cli.py`. It offers `train`, `eval`, `train+eval`, and
+`progress`; the latter prints each recent run as `epoch X/Y` and each evaluation
+as `episodes X/Y`. Each evaluation launched by the CLI writes
+`data/inference/<run>/rollouts.zarr`. This works for the native tasks, ALOHA,
+LH-Square, and the Robomimic image runners; it stores one raw environment step
+per Zarr row, including all actions in an action chunk. Train modes ask for the
+number of sequential runs and assign consecutive seeds starting at 42 by
+default.
 
 ```bash
 MUJOCO_GL=egl MPLCONFIGDIR=/tmp/ldp_mpl CUDA_VISIBLE_DEVICES=0 \

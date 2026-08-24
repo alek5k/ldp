@@ -37,12 +37,18 @@ class DiffusionTransformerLTEImagePolicy(
         n_obs_steps: int,
         temporal_image_zarr_path: str | None = None,
         temporal_image_hdf5_path: str | None = None,
+        temporal_image_cache_in_memory: bool = False,
         temporal_rgb_key: str | None = None,
         temporal_latent_dim: int = 32,
         temporal_hidden_dim: int = 128,
         temporal_recurrent: bool = True,
         temporal_subsample_frames: int = 1,
         temporal_encode_chunk_size: int = 256,
+        temporal_embedding_cache_enabled: bool = False,
+        temporal_embedding_cache_start_epoch: int = 5,
+        temporal_embedding_cache_warmup_epochs: int = 20,
+        temporal_embedding_cache_refresh_epochs: int = 5,
+        history_reconstruction: dict | None = None,
         num_inference_steps: int | None = None,
         use_embed_if_present: bool = False,
         crop_shape=(76, 76),
@@ -100,8 +106,14 @@ class DiffusionTransformerLTEImagePolicy(
             temporal_recurrent=temporal_recurrent,
             temporal_subsample_frames=temporal_subsample_frames,
             temporal_encode_chunk_size=temporal_encode_chunk_size,
+            temporal_embedding_cache_enabled=temporal_embedding_cache_enabled,
+            temporal_embedding_cache_start_epoch=temporal_embedding_cache_start_epoch,
+            temporal_embedding_cache_warmup_epochs=temporal_embedding_cache_warmup_epochs,
+            temporal_embedding_cache_refresh_epochs=temporal_embedding_cache_refresh_epochs,
             temporal_image_zarr_path=temporal_image_zarr_path,
             temporal_image_hdf5_path=temporal_image_hdf5_path,
+            temporal_image_cache_in_memory=temporal_image_cache_in_memory,
+            history_reconstruction=history_reconstruction,
         )
         self.use_embed_if_present = bool(use_embed_if_present)
         # Parent-only / legacy U-Net fields are intentionally ignored by this
@@ -202,18 +214,32 @@ class DiffusionTransformerLTEImagePolicy(
             if lr is None:
                 raise ValueError("learning_rate is required for the transformer optimizer")
             learning_rate = lr
-        return super().get_optimizer(
+        optimizer = super().get_optimizer(
             transformer_weight_decay=transformer_weight_decay,
             obs_encoder_weight_decay=obs_encoder_weight_decay,
             learning_rate=learning_rate,
             betas=tuple(betas),
         )
+        # The parent optimizer only knows the transformer and ordinary visual
+        # encoder.  LTE and its training-only reconstruction decoder must be
+        # optimized too; use the visual-encoder decay, matching the original
+        # implementation's small 1e-6 regularization for these modules.
+        temporal_params = list(self.temporal_encoder.parameters())
+        if self.history_decoder is not None:
+            temporal_params.extend(self.history_decoder.parameters())
+        optimizer.add_param_group({
+            "params": temporal_params,
+            "weight_decay": obs_encoder_weight_decay,
+        })
+        return optimizer
 
     def compute_loss(self, batch, debug: bool = False):
         nobs = self.normalizer.normalize(batch["obs"])
         actions = self.normalizer["action"].normalize(batch["action"])
         batch_size = actions.shape[0]
-        temporal_latents = self._history_latents_from_batch(batch)
+        temporal_latents, history_embeddings, observation_indices = (
+            self._history_latents_and_embeddings_from_batch(batch)
+        )
         cond = self._condition_features(nobs, temporal_latents)
         condition_mask = self.mask_generator(actions.shape)
         noise = torch.randn_like(actions)
@@ -233,4 +259,17 @@ class DiffusionTransformerLTEImagePolicy(
         pred, target, condition_mask = pred[:, start:], target[:, start:], condition_mask[:, start:]
         loss = F.mse_loss(pred, target, reduction="none")
         loss = loss * (~condition_mask).type(loss.dtype)
-        return reduce(loss, "b ... -> b (...)", "mean").mean()
+        diffusion_loss = reduce(loss, "b ... -> b (...)", "mean").mean()
+        reconstruction_loss = self._history_reconstruction_loss(
+            temporal_latents, history_embeddings, observation_indices
+        )
+        total_loss = (
+            diffusion_loss
+            + self.history_reconstruction_lambda * reconstruction_loss
+        )
+        self._last_loss_components = {
+            "total": total_loss.detach(),
+            "diffusion": diffusion_loss.detach(),
+            "history": reconstruction_loss.detach(),
+        }
+        return total_loss

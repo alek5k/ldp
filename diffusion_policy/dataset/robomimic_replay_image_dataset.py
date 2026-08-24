@@ -51,6 +51,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             subsample_frames=1,
             subsampling_method="uniform",
             use_cache=False,
+            cache_images_in_memory=False,
             seed=42,
             val_ratio=0.0,
             return_temporal_history=False,
@@ -69,9 +70,24 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             T.ColorJitter(brightness=0.2, contrast=[0.8,1.2], saturation=[0.8,1.2], hue=0.05),  # Adjust brightness, contrast, saturation, hue
         ])
 
+        rgb_keys = list()
+        lowdim_keys = list()
+        obs_shape_meta = shape_meta['obs']
+        for key, attr in obs_shape_meta.items():
+            type = attr.get('type', 'low_dim')
+            if type == 'rgb':
+                rgb_keys.append(key)
+            elif type == 'low_dim' and key != "embedding":
+                lowdim_keys.append(key)
+        self.cache_images_in_memory = bool(cache_images_in_memory)
+
         replay_buffer = None
         if use_cache:
-            cache_zarr_path = dataset_path + '.zarr.zip'
+            # When RGB is cached directly from HDF5, retain only low-dimensional
+            # arrays/actions in the on-disk ReplayBuffer cache. Keeping JPEG2000
+            # image chunks here would waste both startup time and RAM.
+            cache_suffix = '.lowdim.zarr.zip' if self.cache_images_in_memory else '.zarr.zip'
+            cache_zarr_path = dataset_path + cache_suffix
             cache_lock_path = cache_zarr_path + '.lock'
             print('Acquiring lock on cache.')
             with FileLock(cache_lock_path):
@@ -85,14 +101,21 @@ class RobomimicReplayImageDataset(BaseImageDataset):
                             shape_meta=shape_meta, 
                             dataset_path=dataset_path, 
                             abs_action=abs_action, 
-                            rotation_transformer=rotation_transformer)
+                            rotation_transformer=rotation_transformer,
+                            include_rgb=not self.cache_images_in_memory)
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
                             replay_buffer.save_to_store(
                                 store=zip_store
                             )
                     except Exception as e:
-                        shutil.rmtree(cache_zarr_path)
+                        # Cache conversion can fail before ZipStore creates
+                        # its target. Do not mask that useful exception with
+                        # FileNotFoundError from cleanup.
+                        if os.path.isdir(cache_zarr_path):
+                            shutil.rmtree(cache_zarr_path)
+                        elif os.path.exists(cache_zarr_path):
+                            os.remove(cache_zarr_path)
                         raise e
                 else:
                     print('Loading cached ReplayBuffer from Disk.')
@@ -106,17 +129,13 @@ class RobomimicReplayImageDataset(BaseImageDataset):
                 shape_meta=shape_meta, 
                 dataset_path=dataset_path, 
                 abs_action=abs_action, 
-                rotation_transformer=rotation_transformer)
+                rotation_transformer=rotation_transformer,
+                include_rgb=not self.cache_images_in_memory)
 
-        rgb_keys = list()
-        lowdim_keys = list()
-        obs_shape_meta = shape_meta['obs']
-        for key, attr in obs_shape_meta.items():
-            type = attr.get('type', 'low_dim')
-            if type == 'rgb':
-                rgb_keys.append(key)
-            elif type == 'low_dim' and key != "embedding":
-                lowdim_keys.append(key)
+        self._image_cache = (
+            self._load_hdf5_image_cache(dataset_path, rgb_keys)
+            if self.cache_images_in_memory else None
+        )
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -173,6 +192,33 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         actions = np.array(self.replay_buffer["action"])[None]
         corr = batch_mlp_corr(actions)
         print(actions.shape, {"expert_actions_corr": corr})
+
+    @staticmethod
+    def _load_hdf5_image_cache(dataset_path, rgb_keys):
+        """Load raw RGB arrays straight from HDF5, without JPEG2000/Zarr."""
+        if not rgb_keys:
+            return {}
+        with h5py.File(dataset_path, 'r') as file:
+            demos = file['data']
+            lengths = [
+                demos[f'demo_{index}']['obs'][rgb_keys[0]].shape[0]
+                for index in range(len(demos))
+            ]
+            episode_ends = np.cumsum(lengths, dtype=np.int64)
+            episode_starts = np.concatenate(([0], episode_ends[:-1]))
+            caches = {}
+            for key in rgb_keys:
+                first = demos['demo_0']['obs'][key]
+                cache = np.empty(
+                    (int(episode_ends[-1]),) + first.shape[1:], dtype=first.dtype)
+                for episode_index, episode_start in enumerate(episode_starts):
+                    cache[episode_start:episode_ends[episode_index]] = (
+                        demos[f'demo_{episode_index}']['obs'][key][:]
+                    )
+                caches[key] = cache
+        gib = sum(cache.nbytes for cache in caches.values()) / (1024 ** 3)
+        print(f"Cached {len(caches)} RGB camera(s) directly from HDF5 in RAM ({gib:.2f} GiB).")
+        return caches
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -246,9 +292,23 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             return np.concatenate([sparse, dense])
         raise NotImplementedError
 
+    def _cached_observation_images(self, idx: int):
+        """Return the policy observation window from the raw HDF5 RAM cache."""
+        past_length = self.n_obs_steps * self.subsample_frames
+        buffer_start, _, sample_start, sample_end = self.sampler.indices[idx]
+        positions = np.arange(past_length)
+        clipped = np.clip(positions, sample_start, sample_end - 1)
+        source_indices = buffer_start + clipped - sample_start
+        return {
+            key: cache[source_indices]
+            for key, cache in self._image_cache.items()
+        }
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
         data = self.sampler.sample_sequence(idx)
+        if self._image_cache is not None:
+            data.update(self._cached_observation_images(idx))
         # to save RAM, only return first n_obs_steps of OBS
         # since the rest will be discarded anyway.
         # when self.n_obs_steps is None
@@ -361,8 +421,8 @@ def _convert_actions(raw_actions, abs_action, rotation_transformer):
     return actions
 
 
-def _convert_robomimic_to_replay(store, shape_meta, dataset_path, abs_action, rotation_transformer, 
-        n_workers=None, max_inflight_tasks=None):
+def _convert_robomimic_to_replay(store, shape_meta, dataset_path, abs_action, rotation_transformer,
+        n_workers=None, max_inflight_tasks=None, include_rgb=True):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -380,6 +440,8 @@ def _convert_robomimic_to_replay(store, shape_meta, dataset_path, abs_action, ro
             rgb_keys.append(key)
         elif type == 'low_dim':
             lowdim_keys.append(key)
+    if not include_rgb:
+        rgb_keys = []
     
     root = zarr.group(store)
     data_group = root.require_group('data', overwrite=True)

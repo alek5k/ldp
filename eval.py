@@ -17,6 +17,7 @@ import dill
 from omegaconf import OmegaConf, open_dict
 import wandb
 import json
+import numpy as np
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
 @click.command()
@@ -26,7 +27,7 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 @click.option('-d', '--device', default='cuda:0')
 @click.option('-n', '--num_samples', default=1)
 @click.option('--zarr_path', default=None,
-    help='Optional Zarr store for temporal evaluation episodes.')
+    help='Optional Zarr store for raw image-policy evaluation episodes.')
 @click.option('--n_test', type=int, default=None,
     help='Override the number of fixed-seed test episodes.')
 @click.option('--n_train', type=int, default=None,
@@ -85,17 +86,25 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples,
     if num_inference_steps is not None:
         policy.num_inference_steps = num_inference_steps
 
-    if zarr_path is not None and "temporal_image_runner" not in cfg.task.env_runner._target_:
-        raise click.UsageError(
-            "--zarr_path requires TemporalImageRunner")
+    if zarr_path is not None:
+        supported_zarr_runners = (
+            "temporal_image_runner",
+            "robomimic_image_runner",
+            "robomimic_longhist_image_runner",
+            "aloha_image_runner",
+        )
+        if not any(name in cfg.task.env_runner._target_
+                   for name in supported_zarr_runners):
+            raise click.UsageError(
+                "--zarr_path is supported by the image environment runners only")
 
     if any(value is not None for value in
            (zarr_path, n_test, n_train, n_test_vis, test_start_seed, max_steps,
             n_action_steps)):
         with open_dict(cfg):
-            # All image runners accept these rollout controls. Zarr recording
-            # remains exclusive to TemporalImageRunner, which supplies its
-            # extra zarr_path and zarr_mode constructor arguments.
+            # Image runners accept these rollout controls. Their optional
+            # Zarr export records raw environment transitions, including every
+            # action inside a multi-step action chunk.
             if zarr_path is not None:
                 cfg.task.env_runner.zarr_path = zarr_path
                 cfg.task.env_runner.zarr_mode = 'w'
@@ -121,22 +130,39 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples,
                 cfg.task.env_runner.n_action_steps = n_action_steps
 
     # run eval
+    total_eval_episodes = (
+        int(cfg.task.env_runner.n_train) + int(cfg.task.env_runner.n_test)
+    )
+    print(f"EVAL_PROGRESS total={total_eval_episodes} completed=0")
     env_runner = hydra.utils.instantiate(
         cfg.task.env_runner,
         output_dir=output_dir)
     runner_log = env_runner.run(policy)
     
     print(runner_log)
-    # dump log to json
-    json_log = dict()
-    for key, value in runner_log.items():
+    # Dump a complete, portable result file only after every value has been
+    # converted. Image runners commonly return NumPy scalar rewards, which
+    # the standard JSON encoder does not handle directly.
+    def json_value(value):
         if isinstance(value, wandb.sdk.data_types.video.Video):
-            json_log[key] = value._path
-        else:
-            json_log[key] = value
-    out_path = os.path.join(output_dir, 'eval_log.json')
+            return value._path
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, dict):
+            return {key: json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        return value
+
+    json_log = {key: json_value(value) for key, value in runner_log.items()}
+    out_path = pathlib.Path(output_dir) / 'eval_log.json'
+    temporary_out_path = out_path.with_suffix('.json.tmp')
     print(json_log)
-    json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
+    with temporary_out_path.open('w', encoding='utf-8') as file:
+        json.dump(json_log, file, indent=2, sort_keys=True, allow_nan=False)
+    temporary_out_path.replace(out_path)
 
 if __name__ == '__main__':
     main()

@@ -18,7 +18,7 @@ case "$env_name" in
         ;;
     *) echo "Unknown environment: $env_name" >&2; exit 2 ;;
 esac
-output_dir="${2:-data/outputs/${env_name}_long_context}"
+output_dir="${2:-data/outputs/${env_name}_ptp_$(date +%Y%m%d_%H%M%S)}"
 
 # LiftQA uses MuJoCo off-screen rendering. EGL is the reliable headless backend
 # on the training machine; users can still override it before invoking this script.
@@ -34,8 +34,8 @@ export NUMBA_DISABLE_JIT="${NUMBA_DISABLE_JIT:-1}"
 temporal_crop_shape="${LDP_CROP_SHAPE:-null}"
 temporal_image_pool_class="${LDP_IMAGE_POOL_CLASS:-SpatialMeanPool}"
 
-# Comparison default: no expensive online rollouts during training. Top-k
-# checkpoints are selected by the held-out Zarr validation loss instead.
+# Evaluate online every 50 epochs while retaining validation-loss checkpoint
+# selection for the temporal-comparison runs.
 # Match TemporalDiffusionPolicy inference: predict 16 tokens from two
 # observations and execute the first eight actions before replanning.
 python train.py --config-name=train_diffusion_transformer_hybrid_workspace \
@@ -50,7 +50,7 @@ python train.py --config-name=train_diffusion_transformer_hybrid_workspace \
     training.gradient_accumulate_every=1 \
     task.dataset.val_ratio=0.2 \
     training.num_epochs=200 training.lr_warmup_steps=500 \
-    training.val_every=10 training.checkpoint_every=50 training.rollout_every=1000000 \
+    training.val_every=10 training.checkpoint_every=50 training.rollout_every=50 \
     checkpoint.topk.monitor_key=val_loss checkpoint.topk.mode=min \
     'checkpoint.topk.format_str="epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt"' \
     hydra.run.dir="$output_dir" \

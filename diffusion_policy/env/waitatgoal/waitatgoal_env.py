@@ -452,7 +452,10 @@ class WaitAtGoal(gym.Env):
         return TeleopAgent(act)
 
     def _get_obs(self):
-        img = self._render_frame(mode='human')
+        # Policy observations are rendered to an off-screen Pygame surface.
+        # Requesting ``human`` here unnecessarily initialises an SDL display,
+        # which fails in SSH / headless training sessions.
+        img = self._render_frame(mode='rgb_array')
         agent_pose = np.array([self.agent.position.x, self.agent.position.y], dtype=np.float32)
         obs = { 
             'full_image': np.moveaxis(img.astype(np.float32) / 255, -1, 0),

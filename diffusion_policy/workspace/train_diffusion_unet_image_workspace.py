@@ -75,9 +75,14 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
-        # configure validation dataset
-        val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        # Configure validation lazily.  Besides being useful for short timing
+        # runs, this avoids constructing a second data loader when validation
+        # has been explicitly disabled.
+        val_every = cfg.training.get('val_every', None)
+        val_dataloader = None
+        if val_every is not None:
+            val_dataset = dataset.get_validation_dataset()
+            val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -103,18 +108,25 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env
-        env_runner: BaseImageRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseImageRunner)
+        # Do not construct simulator environments when rollouts are disabled.
+        # This is particularly important for profiling pure training, since
+        # Robomimic environment startup can take longer than a short run.
+        rollout_every = cfg.training.get('rollout_every', None)
+        env_runner = None
+        if rollout_every is not None:
+            env_runner: BaseImageRunner = hydra.utils.instantiate(
+                cfg.task.env_runner,
+                output_dir=self.output_dir)
+            assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
+        wandb_kwargs = OmegaConf.to_container(cfg.logging, resolve=True)
+        # This is a trainer control, not a W&B init option.
+        wandb_kwargs.pop("log_every_n_steps", None)
         wandb_run = wandb.init(
             dir=str(self.output_dir),
             config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
+            **wandb_kwargs
         )
         wandb.config.update(
             {
@@ -123,10 +135,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         )
 
         # configure checkpoint
-        topk_manager = TopKCheckpointManager(
-            save_dir=os.path.join(self.output_dir, 'checkpoints'),
-            **cfg.checkpoint.topk
-        )
+        checkpoint_every = cfg.training.get('checkpoint_every', None)
+        topk_manager = None
+        if checkpoint_every is not None:
+            topk_manager = TopKCheckpointManager(
+                save_dir=os.path.join(self.output_dir, 'checkpoints'),
+                **cfg.checkpoint.topk
+            )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -147,8 +162,42 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
+        # LTE history frame indices select from a CPU-resident NumPy/Zarr
+        # cache. Keep that lightweight metadata on CPU so the policy can
+        # select its image chunks without a GPU->CPU round trip.
+        temporal_history_cpu_keys = {
+            "temporal_history_image_indices",
+            "temporal_history_mask",
+            "temporal_obs_history_indices",
+        }
+
+        def transfer_batch_to_device(batch):
+            return {
+                key: value if key in temporal_history_cpu_keys
+                else (
+                    dict_apply(value, lambda x: x.to(device, non_blocking=True))
+                    if isinstance(value, dict)
+                    else value.to(device, non_blocking=True)
+                )
+                for key, value in batch.items()
+            }
+
+        def lte_loss_components() -> dict[str, float]:
+            getter = getattr(self.model, "get_last_loss_components", None)
+            if getter is None:
+                return {}
+            return {
+                name: float(value.item())
+                for name, value in getter().items()
+            }
+
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+        log_every_n_steps = cfg.logging.get("log_every_n_steps", 1)
+        if log_every_n_steps is not None:
+            log_every_n_steps = int(log_every_n_steps)
+            if log_every_n_steps < 1:
+                raise ValueError("logging.log_every_n_steps must be positive or null")
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
@@ -157,17 +206,27 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     self.model.obs_encoder.eval()
                     self.model.obs_encoder.requires_grad_(False)
 
+                refresh_temporal_cache = getattr(
+                    self.model, "refresh_temporal_embedding_cache", None
+                )
+                if refresh_temporal_cache is not None and refresh_temporal_cache(self.epoch):
+                    print(
+                        "Refreshed detached LTE image-embedding cache "
+                        f"at epoch {self.epoch}."
+                    )
+
                 train_losses = list()
+                train_component_losses: dict[str, list[float]] = {}
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
-                        # device transfer
-                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        batch = transfer_batch_to_device(batch)
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
                         # compute loss
                         raw_loss = self.model.compute_loss(batch)
+                        component_values = lte_loss_components()
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
 
@@ -185,18 +244,29 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
+                        for name, value in component_values.items():
+                            train_component_losses.setdefault(name, []).append(value)
                         step_log = {
                             'train_loss': raw_loss_cpu,
                             'global_step': self.global_step,
                             'epoch': self.epoch,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
+                        step_log.update({
+                            f'train_loss_{name}': value
+                            for name, value in component_values.items()
+                        })
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
-                        if not is_last_batch:
+                        should_log_step = (
+                            log_every_n_steps is not None
+                            and (self.global_step % log_every_n_steps) == 0
+                        )
+                        if not is_last_batch and should_log_step:
                             # log of last step is combined with validation and rollout
                             wandb_run.log(step_log, step=self.global_step)
                             json_logger.log(step_log)
+                        if not is_last_batch:
                             self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
@@ -207,6 +277,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
+                for name, values in train_component_losses.items():
+                    step_log[f'train_loss_{name}'] = np.mean(values)
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -215,21 +287,24 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if rollout_every is not None and (self.epoch % rollout_every) == 0:
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
 
                 # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
+                if val_every is not None and (self.epoch % val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
+                        val_component_losses: dict[str, list[float]] = {}
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                batch = transfer_batch_to_device(batch)
                                 loss = self.model.compute_loss(batch)
                                 val_losses.append(loss)
+                                for name, value in lte_loss_components().items():
+                                    val_component_losses.setdefault(name, []).append(value)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
@@ -237,12 +312,15 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
+                            for name, values in val_component_losses.items():
+                                step_log[f'val_loss_{name}'] = np.mean(values)
 
                 # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0:
+                sample_every = cfg.training.get('sample_every', None)
+                if sample_every is not None and (self.epoch % sample_every) == 0:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
-                        batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
+                        batch = transfer_batch_to_device(train_sampling_batch)
                         obs_dict = batch['obs']
                         gt_action = batch['action']
                         
@@ -258,7 +336,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         del mse
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
+                if checkpoint_every is not None and (self.epoch % checkpoint_every) == 0:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
@@ -274,10 +352,21 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     # We can't copy the last checkpoint here
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-
-                    if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
+                    # Some task presets checkpoint more frequently than they
+                    # run rollouts.  A score-monitored top-k checkpoint can
+                    # only be ranked on epochs where its rollout metric was
+                    # recorded; ``latest.ckpt`` above is still saved on every
+                    # checkpoint epoch.
+                    if topk_manager.monitor_key in metric_dict:
+                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                        if topk_ckpt_path is not None:
+                            self.save_checkpoint(path=topk_ckpt_path)
+                    else:
+                        print(
+                            "Skipping top-k checkpoint: monitor metric "
+                            f"{topk_manager.monitor_key!r} was not recorded "
+                            f"at epoch {self.epoch}."
+                        )
                 # ========= eval end for this epoch ==========
                 policy.train()
 

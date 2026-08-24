@@ -151,6 +151,35 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         # save batch for sampling
         train_sampling_batch = None
 
+        # LTE history frame indices select from a CPU-resident NumPy/Zarr
+        # cache. Keeping this metadata on CPU avoids synchronizing back from
+        # CUDA once per temporal image chunk.
+        temporal_history_cpu_keys = {
+            "temporal_history_image_indices",
+            "temporal_history_mask",
+            "temporal_obs_history_indices",
+        }
+
+        def transfer_batch_to_device(batch):
+            return {
+                key: value if key in temporal_history_cpu_keys
+                else (
+                    dict_apply(value, lambda x: x.to(device, non_blocking=True))
+                    if isinstance(value, dict)
+                    else value.to(device, non_blocking=True)
+                )
+                for key, value in batch.items()
+            }
+
+        def lte_loss_components() -> dict[str, float]:
+            getter = getattr(self.model, "get_last_loss_components", None)
+            if getter is None:
+                return {}
+            return {
+                name: float(value.item())
+                for name, value in getter().items()
+            }
+
         # training loop
         debug = True
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -158,18 +187,28 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
+                refresh_temporal_cache = getattr(
+                    self.model, "refresh_temporal_embedding_cache", None
+                )
+                if refresh_temporal_cache is not None and refresh_temporal_cache(self.epoch):
+                    print(
+                        "Refreshed detached LTE image-embedding cache "
+                        f"at epoch {self.epoch}."
+                    )
+
                 train_losses = list()
+                train_component_losses: dict[str, list[float]] = {}
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
-                        # device transfer
-                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        batch = transfer_batch_to_device(batch)
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
                         
                         # compute loss
                         raw_loss = self.model.compute_loss(batch, debug)
                         debug = False
+                        component_values = lte_loss_components()
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
 
@@ -187,12 +226,18 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
+                        for name, value in component_values.items():
+                            train_component_losses.setdefault(name, []).append(value)
                         step_log = {
                             'train_loss': raw_loss_cpu,
                             'global_step': self.global_step,
                             'epoch': self.epoch,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
+                        step_log.update({
+                            f'train_loss_{name}': value
+                            for name, value in component_values.items()
+                        })
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
@@ -209,6 +254,8 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
+                for name, values in train_component_losses.items():
+                    step_log[f'train_loss_{name}'] = np.mean(values)
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -230,12 +277,15 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 if ((self.epoch + 1) % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
+                        val_component_losses: dict[str, list[float]] = {}
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                batch = transfer_batch_to_device(batch)
                                 loss = self.model.compute_loss(batch)
                                 val_losses.append(loss)
+                                for name, value in lte_loss_components().items():
+                                    val_component_losses.setdefault(name, []).append(value)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
@@ -243,12 +293,14 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
+                            for name, values in val_component_losses.items():
+                                step_log[f'val_loss_{name}'] = np.mean(values)
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
-                        batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
+                        batch = transfer_batch_to_device(train_sampling_batch)
                         obs_dict = batch['obs']
                         gt_action = batch['action']
                         
