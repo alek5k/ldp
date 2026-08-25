@@ -73,6 +73,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
+        if getattr(dataset, "cache_images_on_gpu", False):
+            for loader_cfg in (cfg.dataloader, cfg.val_dataloader):
+                loader_cfg.num_workers = 0
+                loader_cfg.persistent_workers = False
+                loader_cfg.pop("prefetch_factor", None)
+            print("Raw image GPU cache: forcing DataLoader workers to 0.")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 

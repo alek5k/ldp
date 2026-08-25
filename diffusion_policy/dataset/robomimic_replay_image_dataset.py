@@ -52,6 +52,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             subsampling_method="uniform",
             use_cache=False,
             cache_images_in_memory=False,
+            cache_images_on_gpu=False,
             image_augmentation=True,
             seed=42,
             val_ratio=0.0,
@@ -87,7 +88,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
                 rgb_keys.append(key)
             elif type == 'low_dim' and key != "embedding":
                 lowdim_keys.append(key)
-        self.cache_images_in_memory = bool(cache_images_in_memory)
+        self.cache_images_on_gpu = bool(cache_images_on_gpu)
+        self.cache_images_in_memory = bool(cache_images_in_memory) or self.cache_images_on_gpu
 
         replay_buffer = None
         if use_cache:
@@ -144,6 +146,16 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             self._load_hdf5_image_cache(dataset_path, rgb_keys)
             if self.cache_images_in_memory else None
         )
+        self._gpu_image_cache = None
+        if self.cache_images_on_gpu:
+            if not torch.cuda.is_available():
+                raise RuntimeError("cache_images_on_gpu requires a CUDA device.")
+            self._gpu_image_cache = {
+                key: torch.from_numpy(np.ascontiguousarray(value)).to("cuda")
+                for key, value in self._image_cache.items()
+            }
+            gib = sum(value.nbytes for value in self._gpu_image_cache.values()) / (1024 ** 3)
+            print(f"Cached {len(self._gpu_image_cache)} RGB camera(s) on GPU ({gib:.2f} GiB).")
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -307,10 +319,10 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         positions = np.arange(past_length)
         clipped = np.clip(positions, sample_start, sample_end - 1)
         source_indices = buffer_start + clipped - sample_start
-        return {
-            key: cache[source_indices]
-            for key, cache in self._image_cache.items()
-        }
+        if self._gpu_image_cache is not None:
+            indices = torch.as_tensor(source_indices, device="cuda", dtype=torch.long)
+            return {key: cache[indices] for key, cache in self._gpu_image_cache.items()}
+        return {key: cache[source_indices] for key, cache in self._image_cache.items()}
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
@@ -335,6 +347,22 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             # T,H,W,C
             # convert uint8 image to float32))
             subsampled = data[key]
+            if isinstance(subsampled, torch.Tensor):
+                past_data = subsampled[:self.n_obs_steps*self.subsample_frames]
+                if self.subsampling_method == "uniform":
+                    past_data = past_data[self.subsample_frames-1::self.subsample_frames]
+                elif self.subsampling_method == "mixed":
+                    sparse = past_data[self.subsample_frames-1::self.subsample_frames][-floor(self.n_obs_steps/2):]
+                    dense = past_data[-self.subsample_frames:][-ceil(self.n_obs_steps/2):]
+                    past_data = torch.cat([sparse, dense])
+                else:
+                    raise NotImplementedError
+                image = past_data[T_slice].movedim(-1, 1).to(torch.uint8)
+                if self.image_transforms is not None:
+                    image = self.image_transforms(image)
+                obs_dict[key] = image.to(torch.float32) / 255.
+                del data[key]
+                continue
             past_data = subsampled[:self.n_obs_steps*self.subsample_frames]
             if self.subsampling_method == "uniform":
                 past_data = past_data[self.subsample_frames-1::self.subsample_frames]
