@@ -221,7 +221,7 @@ run_training() {
         run_name="${TARGET_ENVIRONMENT//-/_}_${TRAINING_METHOD}_$(date +%Y%m%d_%H%M%S)"
         (( TRAIN_SEQUENTIAL_RUNS > 1 )) && run_name+="-r$((i+1))"
         output_dir="${output_root}/${run_name}"
-        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "logging.name=${run_name}")
+        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
         if [[ "${TRAINING_METHOD}" == lte ]]; then
             [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")

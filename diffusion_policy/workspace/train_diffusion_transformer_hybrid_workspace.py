@@ -28,10 +28,7 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
-from diffusion_policy.common.wandb_checkpoint import (
-    sync_checkpoints_to_wandb,
-    sync_run_folder_to_wandb,
-)
+from diffusion_policy.common.wandb_checkpoint import sync_run_folder_to_wandb
 from hsic import batch_hsic
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -378,16 +375,8 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         # pending background writes have completed.
         if self._saving_thread is not None:
             self._saving_thread.join()
-        final_checkpoint = self.save_checkpoint(use_thread=False)
+        self.save_checkpoint(use_thread=False)
         try:
-            checkpoint_count = sync_checkpoints_to_wandb(
-                wandb,
-                wandb_run,
-                output_dir=self.output_dir,
-                checkpoint_dir=pathlib.Path(final_checkpoint).parent,
-                epoch=self.epoch,
-            )
-            print(f"Synced {checkpoint_count} checkpoints to Weights & Biases.")
             file_count = sync_run_folder_to_wandb(
                 wandb,
                 wandb_run,
@@ -398,7 +387,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         except Exception as error:
             # A W&B/network failure should not make an otherwise successful
             # train (or train+eval) screen command fail.
-            print(f"Could not sync checkpoints to Weights & Biases: {error}")
+            print(f"Could not sync run folder to Weights & Biases: {error}")
         finally:
             try:
                 wandb_run.finish()
