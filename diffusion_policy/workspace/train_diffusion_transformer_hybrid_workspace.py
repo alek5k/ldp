@@ -128,10 +128,13 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
+        wandb_kwargs = OmegaConf.to_container(cfg.logging, resolve=True)
+        # This is a trainer control, not a W&B init option.
+        wandb_kwargs.pop("log_every_n_steps", None)
         wandb_run = wandb.init(
             dir=str(self.output_dir),
             config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
+            **wandb_kwargs
         )
         wandb.config.update(
             {
