@@ -50,8 +50,8 @@ dependencies:
   # trick to force reinstall imagecodecs via pip
   - imagecodecs==2022.8.8
   - pip:
-    # Conda's 0.28.2 build requires Python >=3.10; PyPI supports this env's 3.9.
-    - wandb==0.28.2
+    # 0.26.1 is the newest W&B release compatible with Python 3.9.
+    - wandb==0.26.1
     # Diffusers 0.11 imports the legacy cached_download helper.
     # This historical pin is available from PyPI, not current Conda channels.
     - huggingface-hub==0.25.2
