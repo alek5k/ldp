@@ -156,6 +156,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             }
             gib = sum(value.nbytes for value in self._gpu_image_cache.values()) / (1024 ** 3)
             print(f"Cached {len(self._gpu_image_cache)} RGB camera(s) on GPU ({gib:.2f} GiB).")
+            # RAM is only a staging area for the HDF5 upload. Keep one copy.
+            self._image_cache = None
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -324,6 +326,25 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             return {key: cache[indices] for key, cache in self._gpu_image_cache.items()}
         return {key: cache[source_indices] for key, cache in self._image_cache.items()}
 
+    def _cached_observation_image_indices(self, idx: int) -> np.ndarray:
+        """Return absolute frame IDs for the policy observation window."""
+        past_length = self.n_obs_steps * self.subsample_frames
+        buffer_start, _, sample_start, sample_end = self.sampler.indices[idx]
+        positions = np.arange(past_length)
+        clipped = np.clip(positions, sample_start, sample_end - 1)
+        source_indices = buffer_start + clipped - sample_start
+        return source_indices[self._observation_positions()].astype(np.int64)
+
+    def gather_gpu_images(self, indices: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Gather one already-collated image batch from the GPU cache."""
+        if self._gpu_image_cache is None:
+            raise RuntimeError("GPU image cache is not enabled.")
+        indices = indices.to(device="cuda", dtype=torch.long)
+        return {
+            key: cache[indices].movedim(-1, 2).to(torch.float32).div_(255.0)
+            for key, cache in self._gpu_image_cache.items()
+        }
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
         data = self.sampler.sample_sequence(idx)
@@ -342,7 +363,14 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             rgb_keys = []
             lowdim_keys = ["embedding"]
 
+        gpu_image_indices = (
+            self._cached_observation_image_indices(idx)
+            if self._gpu_image_cache is not None else None
+        )
+
         for key in rgb_keys:
+            if gpu_image_indices is not None:
+                continue
             # move channel last to channel first
             # T,H,W,C
             # convert uint8 image to float32))
@@ -413,6 +441,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             ),
             'action': torch.from_numpy(data['action'].astype(np.float32))
         }
+        if gpu_image_indices is not None:
+            torch_data['gpu_image_indices'] = torch.from_numpy(gpu_image_indices)
         if self.return_temporal_history:
             # Provide a complete episode prefix as cheap global indices.  The
             # LTE policy reads the selected camera directly from the source
