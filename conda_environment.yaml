@@ -49,9 +49,16 @@ dependencies:
   # trick to force reinstall imagecodecs via pip
   - imagecodecs==2022.8.8
   - pip:
-    # 0.26.1 is the newest W&B release compatible with Python 3.9.
+    # Match the working robodiff-lh-5090 environment. The Conda base above
+    # retains its legacy Pytorch3D build; pip then provides the active CUDA
+    # 12.8 Torch stack used at runtime.
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.7.0+cu128
+    - torchvision==0.22.0+cu128
+    - torchaudio==2.7.0+cu128
+    - triton==3.3.0
+    # Newest W&B release that supports Python 3.9.
     - wandb==0.26.1
-    # Modern TensorBoard supports the protobuf required by current W&B.
     - tensorboard==2.18.0
     - protobuf==4.25.3
     # Diffusers 0.11 imports the legacy cached_download helper.

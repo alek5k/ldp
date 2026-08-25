@@ -221,7 +221,7 @@ run_training() {
         run_name="${TARGET_ENVIRONMENT//-/_}_${TRAINING_METHOD}_$(date +%Y%m%d_%H%M%S)"
         (( TRAIN_SEQUENTIAL_RUNS > 1 )) && run_name+="-r$((i+1))"
         output_dir="${output_root}/${run_name}"
-        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}")
+        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
         if [[ "${TRAINING_METHOD}" == lte ]]; then
             [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
@@ -240,6 +240,13 @@ as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential ca-certificates cmake curl ffmpeg git git-lfs \
     libegl1 libgl1 libglib2.0-0 libglfw3 libglew-dev libosmesa6-dev \
     patchelf pkg-config rsync screen unzip wget
+# Permit CUDA pinned-memory allocations for this VM user. The limits file
+# applies after the next login; prlimit attempts to update this shell now.
+MEMLOCK_USER="${SUDO_USER:-${USER}}"
+printf '%s soft memlock unlimited\n%s hard memlock unlimited\n' "${MEMLOCK_USER}" "${MEMLOCK_USER}" \
+    | as_root tee /etc/security/limits.d/99-ldp-memlock.conf >/dev/null
+as_root prlimit --pid "$$" --memlock=unlimited:unlimited || true
+ulimit -l unlimited || true
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 MINIFORGE_ARCH="x86_64"
 
