@@ -3,7 +3,7 @@
 The module intentionally has no timestep input.  Its state at ``t`` depends
 only on the ResNet feature at ``t`` and the preceding latent state.
 """
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -103,6 +103,65 @@ class ImageHistoryDecoder(nn.Module):
         return self.mlp(torch.cat([latents, query_lags], dim=-1))
 
 
+class MultiImageEmbeddingFusion(nn.Module):
+    """Fuse any number of per-camera features into one LTE input feature."""
+
+    def __init__(
+        self, embedding_dims: Sequence[int], output_dim: int, hidden_dim: int
+    ):
+        super().__init__()
+        if len(embedding_dims) < 2:
+            raise ValueError("MultiImageEmbeddingFusion requires at least two views")
+        self.embedding_dims = tuple(int(dim) for dim in embedding_dims)
+        if any(dim <= 0 for dim in self.embedding_dims):
+            raise ValueError("image embedding dimensions must be positive")
+        self.output_dim = int(output_dim)
+        if self.output_dim <= 0 or hidden_dim <= 0:
+            raise ValueError("fusion dimensions must be positive")
+        self.mlp = nn.Sequential(
+            nn.Linear(sum(self.embedding_dims), int(hidden_dim)),
+            nn.SiLU(),
+            nn.Linear(int(hidden_dim), self.output_dim),
+        )
+
+    def forward(self, embeddings: Sequence[torch.Tensor]) -> torch.Tensor:
+        if len(embeddings) != len(self.embedding_dims):
+            raise ValueError("number of image embeddings does not match configured views")
+        prefix = embeddings[0].shape[:-1]
+        for embedding, expected_dim in zip(embeddings, self.embedding_dims):
+            if embedding.shape[:-1] != prefix or embedding.shape[-1] != expected_dim:
+                raise ValueError("image embeddings have incompatible shapes")
+        return self.mlp(torch.cat(list(embeddings), dim=-1))
+
+
+class MultiImageHistoryDecoder(nn.Module):
+    """Training-only shared history decoder trunk with per-camera heads."""
+
+    def __init__(
+        self, latent_dim: int, image_embedding_dims: Sequence[int], hidden_dim: int,
+        num_hidden_layers: int = 1,
+    ):
+        super().__init__()
+        if len(image_embedding_dims) < 2:
+            raise ValueError("MultiImageHistoryDecoder requires at least two views")
+        if num_hidden_layers < 1:
+            raise ValueError("num_hidden_layers must be at least one")
+        self.image_embedding_dims = tuple(int(dim) for dim in image_embedding_dims)
+        layers = [nn.Linear(latent_dim + 1, hidden_dim), nn.SiLU()]
+        for _ in range(num_hidden_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.SiLU()])
+        self.trunk = nn.Sequential(*layers)
+        self.heads = nn.ModuleList(
+            nn.Linear(hidden_dim, dim) for dim in self.image_embedding_dims
+        )
+
+    def forward(self, latents: torch.Tensor, query_lags: torch.Tensor) -> list[torch.Tensor]:
+        if query_lags.shape[-1] != 1:
+            raise ValueError("query_lags must have final dimension 1")
+        hidden = self.trunk(torch.cat([latents, query_lags], dim=-1))
+        return [head(hidden) for head in self.heads]
+
+
 def _sample_stratified_history_lags(elapsed: torch.Tensor, num_queries: int) -> torch.Tensor:
     """Sample one lag from every equal-width interval in the causal past."""
     if num_queries <= 0:
@@ -179,3 +238,34 @@ def image_history_reconstruction_loss(
         decoder_query_lags.unsqueeze(-1),
     )
     return nn.functional.mse_loss(predictions, targets)
+
+
+def multi_image_history_reconstruction_loss(
+    decoder: MultiImageHistoryDecoder,
+    observation_latents: torch.Tensor,
+    history_embeddings: Sequence[torch.Tensor],
+    observation_indices: torch.Tensor,
+    num_history_queries: int,
+    normalize_query_lags: bool = False,
+) -> torch.Tensor:
+    """Average independent per-view reconstruction losses at shared queries."""
+    if len(history_embeddings) != len(decoder.image_embedding_dims):
+        raise ValueError("number of histories does not match decoder views")
+    elapsed = observation_indices.to(history_embeddings[0].dtype).clamp_min(0)
+    query_lags = _sample_stratified_history_lags(elapsed, num_history_queries)
+    decoder_query_lags = query_lags
+    if normalize_query_lags:
+        max_history_index = max(history_embeddings[0].shape[1] - 1, 1)
+        decoder_query_lags = query_lags * (2.0 / (max_history_index + 1e-8))
+    targets = [
+        _interpolate_past_embeddings(embeddings, observation_indices, query_lags)
+        for embeddings in history_embeddings
+    ]
+    predictions = decoder(
+        observation_latents.unsqueeze(-2).expand(-1, -1, num_history_queries, -1),
+        decoder_query_lags.unsqueeze(-1),
+    )
+    return torch.stack([
+        nn.functional.mse_loss(prediction, target)
+        for prediction, target in zip(predictions, targets)
+    ]).mean()

@@ -8,7 +8,6 @@ import sys
 sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
-import os
 import pathlib
 import click
 import hydra
@@ -19,6 +18,19 @@ import wandb
 import json
 import numpy as np
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
+
+
+def _next_available_output_dir(path: pathlib.Path) -> pathlib.Path:
+    """Choose a readable, non-destructive directory for a repeated evaluation."""
+    if not path.exists() and not path.is_symlink():
+        return path
+    attempt = 2
+    while True:
+        candidate = path.with_name(f"{path.name}-r{attempt}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        attempt += 1
+
 
 @click.command()
 @click.option('-c', '--checkpoint', required=True)
@@ -45,9 +57,20 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 def main(checkpoint, output_dir, force_perturbs, device, num_samples,
          zarr_path, n_test, n_train, n_test_vis, test_start_seed, max_steps,
          n_action_steps, num_inference_steps):
-    if os.path.exists(output_dir):
-        click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
-    pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
+    requested_output_dir = pathlib.Path(output_dir)
+    resolved_output_dir = _next_available_output_dir(requested_output_dir)
+    if resolved_output_dir != requested_output_dir:
+        print(
+            f"Output path {requested_output_dir} already exists; "
+            f"using {resolved_output_dir}."
+        )
+        # The CLI places the rollout Zarr inside the evaluation directory.
+        # Keep it coupled to the collision-resolved directory rather than
+        # accidentally reusing the earlier evaluation's dataset.
+        if zarr_path == str(requested_output_dir / "rollouts.zarr"):
+            zarr_path = str(resolved_output_dir / "rollouts.zarr")
+    output_dir = str(resolved_output_dir)
+    resolved_output_dir.mkdir(parents=True, exist_ok=False)
     
     if force_perturbs:
         perturb_cfg = OmegaConf.load(force_perturbs)

@@ -48,6 +48,10 @@ policy:
   n_action_steps: ${n_action_steps}
   n_obs_steps: ${n_obs_steps}
   temporal_image_zarr_path: ${task.dataset.zarr_path}
+  temporal_rgb_keys: null
+  temporal_multi_image_fusion_enabled: false
+  temporal_multi_image_fusion_dim: null
+  temporal_multi_image_fusion_hidden_dim: null
   temporal_latent_dim: 32
   temporal_hidden_dim: 128
   temporal_recurrent: true

@@ -16,9 +16,12 @@ import sys
 import time
 from pathlib import Path
 
+from omegaconf import OmegaConf
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 TRAIN_SCRIPT = REPO_ROOT / "train_lte_img_not.sh"
+TRAIN_PY = REPO_ROOT / "train.py"
 EVAL_SCRIPT = REPO_ROOT / "eval.py"
 TASKS = (
     "square",
@@ -49,6 +52,11 @@ ZARR_RUNNER_MODULES = (
     "aloha_image_runner",
 )
 CLI_LOG_DIR = REPO_ROOT / "data" / "cli_logs"
+LOCAL_OUTPUT_ROOT = REPO_ROOT / "data" / "outputs"
+EXTERNAL_OUTPUT_ROOT = REPO_ROOT / "data" / "outputs_extdrive"
+# New training runs live on the external drive by default. Local and external
+# roots are both still searched by the progress and analysis tools.
+DEFAULT_OUTPUT_ROOT = EXTERNAL_OUTPUT_ROOT
 LAUNCHER_EPOCH_CONFIGS = {
     "square": "square/lte_img_not.yaml",
     "square-unet": "square/lte_img_not.yaml",
@@ -62,6 +70,10 @@ LAUNCHER_EPOCH_CONFIGS = {
     "lh-square-unet": "longhist/lte_img_not.yaml",
     "waitatgoal": "waitatgoal/lte_img_not.yaml",
     "liftqa": "liftqa/lte_img_not.yaml",
+}
+PTP_TASK_CONFIGS = {
+    "lh-aloha": REPO_ROOT / "experiment_configs" / "aloha" / "transformer_aloha.yaml",
+    "lh-square": REPO_ROOT / "experiment_configs" / "longhist" / "transformer_longhist.yaml",
 }
 STALE_PROGRESS_SECONDS = 15 * 60
 RUN_NOTE_FILENAME = "note.txt"
@@ -100,6 +112,25 @@ def _prompt_int(prompt: str, default: int, minimum: int = 0) -> int:
             return value
         except ValueError:
             print(f"Enter an integer greater than or equal to {minimum}.")
+
+
+def _prompt_float(prompt: str, default: float, minimum: float = 0.0) -> float:
+    while True:
+        answer = input(f"{prompt} [{default:g}]: ").strip()
+        if not answer:
+            return default
+        try:
+            value = float(answer)
+            if not math.isfinite(value) or value < minimum:
+                raise ValueError
+            return value
+        except ValueError:
+            print(f"Enter a finite number greater than or equal to {minimum:g}.")
+
+
+def _prompt_text(prompt: str, default: str) -> str:
+    answer = input(f"{prompt} [{default}]: ").strip()
+    return answer or default
 
 
 def _prompt_bool(prompt: str, default: bool) -> bool:
@@ -279,6 +310,11 @@ def _run_name(
     return f"{task.replace('-', '_')}_lte_{decoder}_{timestamp}"
 
 
+def _ptp_run_name(task: str) -> str:
+    """Return the timestamped run name used by past-token-prediction training."""
+    return f"{task.replace('-', '_')}_ptp_{time.strftime('%Y%m%d_%H%M%S')}"
+
+
 def _next_available_path(path: Path) -> Path:
     """Keep a readable run name while avoiding collisions with prior runs."""
     if not _path_is_occupied(path):
@@ -296,15 +332,44 @@ def _path_is_occupied(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _training_output_roots() -> tuple[Path, ...]:
+    """Return output roots once each, preferring the external-drive archive."""
+    roots = []
+    seen = set()
+    for root in (EXTERNAL_OUTPUT_ROOT, LOCAL_OUTPUT_ROOT):
+        identity = root.resolve(strict=False)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        roots.append(root)
+    return tuple(roots)
+
+
+def _training_run_directories() -> list[Path]:
+    """Discover direct run directories across local and external output roots."""
+    runs = {}
+    for output_root in _training_output_roots():
+        if not output_root.is_dir():
+            continue
+        for run_dir in sorted(output_root.iterdir(), key=lambda path: path.name):
+            if run_dir.is_dir() and not run_dir.is_symlink():
+                runs.setdefault(run_dir.name, run_dir)
+    return sorted(runs.values(), key=lambda path: path.name)
+
+
 def _next_available_training_paths(output_root: Path, name: str) -> tuple[Path, Path]:
     """Find matching train/eval directories whose shared run name is unused."""
     inference_root = REPO_ROOT / "data" / "inference"
+    output_roots = (output_root, *_training_output_roots())
     attempt = 1
     while True:
         run_name = name if attempt == 1 else f"{name}-r{attempt}"
         output_dir = output_root / run_name
         inference_dir = inference_root / run_name
-        if not _path_is_occupied(output_dir) and not _path_is_occupied(inference_dir):
+        if (
+            not any(_path_is_occupied(root / run_name) for root in output_roots)
+            and not _path_is_occupied(inference_dir)
+        ):
             return output_dir, inference_dir
         attempt += 1
 
@@ -331,7 +396,11 @@ def _planned_runs(
 ) -> list[tuple[int, Path, Path]]:
     run_count = _prompt_int("Sequential runs", default=1, minimum=1)
     first_seed = _prompt_int("First training seed", default=42, minimum=0)
-    output_root = Path(input("Training output root [data/outputs]: ").strip() or "data/outputs")
+    default_output_root = DEFAULT_OUTPUT_ROOT.relative_to(REPO_ROOT)
+    output_root = Path(
+        input(f"Training output root [{default_output_root}]: ").strip()
+        or default_output_root
+    )
     if not output_root.is_absolute():
         output_root = REPO_ROOT / output_root
 
@@ -352,12 +421,39 @@ def _planned_runs(
     return runs
 
 
+def _planned_ptp_runs(task: str) -> list[tuple[int, Path, Path]]:
+    """Plan PTP runs with the same output and collision rules as LTE runs."""
+    run_count = _prompt_int("Sequential runs", default=1, minimum=1)
+    first_seed = _prompt_int("First training seed", default=42, minimum=0)
+    default_output_root = DEFAULT_OUTPUT_ROOT.relative_to(REPO_ROOT)
+    output_root = Path(
+        input(f"Training output root [{default_output_root}]: ").strip()
+        or default_output_root
+    )
+    if not output_root.is_absolute():
+        output_root = REPO_ROOT / output_root
+
+    runs = []
+    for offset in range(run_count):
+        seed = first_seed + offset
+        output_dir, inference_dir = _next_available_training_paths(
+            output_root, _ptp_run_name(task)
+        )
+        runs.append((seed, output_dir, inference_dir))
+    return runs
+
+
 def _config_default_epochs(launcher_task: str) -> int:
     """Read the selected task preset rather than duplicating its epoch count."""
     config_relpath = LAUNCHER_EPOCH_CONFIGS.get(launcher_task)
     if config_relpath is None:
         raise ValueError(f"No LTE epoch config registered for {launcher_task!r}")
     config_path = REPO_ROOT / "experiment_configs" / config_relpath
+    return _config_path_default_epochs(config_path)
+
+
+def _config_path_default_epochs(config_path: Path) -> int:
+    """Read training.num_epochs from a standalone experiment config."""
     match = re.search(
         r"(?m)^training:\n(?:  [^\n]*\n)*?  num_epochs:\s*(\d+)\s*$",
         config_path.read_text(encoding="utf-8"),
@@ -365,6 +461,56 @@ def _config_default_epochs(launcher_task: str) -> int:
     if match is None:
         raise ValueError(f"Could not find training.num_epochs in {config_path}")
     return int(match.group(1))
+
+
+def _prompt_optimization_parameters(
+    config_path: Path,
+) -> tuple[int, int | None, float, str | None, int | None]:
+    """Prompt for batch and learning-rate settings defined by a task config."""
+    config = OmegaConf.load(config_path)
+    batch_size = _prompt_int(
+        "Training batch size", default=int(config.dataloader.batch_size), minimum=1
+    )
+    val_batch_size = None
+    if "val_dataloader" in config and "batch_size" in config.val_dataloader:
+        val_batch_size = batch_size
+    learning_rate = _prompt_float(
+        "Learning rate", default=float(config.optimizer.learning_rate), minimum=0.0
+    )
+
+    lr_scheduler = None
+    lr_warmup_steps = None
+    if "lr_scheduler" in config.training:
+        lr_scheduler = _prompt_text(
+            "Learning-rate scheduler", default=str(config.training.lr_scheduler)
+        )
+    if "lr_warmup_steps" in config.training:
+        lr_warmup_steps = _prompt_int(
+            "Learning-rate warm-up steps",
+            default=int(config.training.lr_warmup_steps),
+            minimum=0,
+        )
+    return batch_size, val_batch_size, learning_rate, lr_scheduler, lr_warmup_steps
+
+
+def _lte_rgb_keys(launcher_task: str) -> tuple[str, list[str]]:
+    """Resolve the primary and available LTE camera keys from the task preset."""
+    config_relpath = LAUNCHER_EPOCH_CONFIGS.get(launcher_task)
+    if config_relpath is None:
+        raise ValueError(f"No LTE task config registered for {launcher_task!r}")
+    config = OmegaConf.load(REPO_ROOT / "experiment_configs" / config_relpath)
+    task = config.task
+    primary_key = str(task.lte_temporal_rgb_key)
+    rgb_keys = [
+        str(key)
+        for key, metadata in task.shape_meta.obs.items()
+        if metadata.get("type", "low_dim") == "rgb"
+    ]
+    if primary_key not in rgb_keys:
+        raise ValueError(
+            f"Task {launcher_task!r} has non-RGB LTE key {primary_key!r}."
+        )
+    return primary_key, rgb_keys
 
 
 def _training_command(
@@ -384,6 +530,13 @@ def _training_command(
     cache_start_epoch: int,
     cache_warmup_epochs: int,
     cache_refresh_epochs: int,
+    temporal_multi_image_fusion: bool,
+    temporal_rgb_keys: list[str] | None,
+    batch_size: int,
+    val_batch_size: int | None,
+    learning_rate: float,
+    lr_scheduler: str | None,
+    lr_warmup_steps: int | None,
 ) -> str:
     command = [
         str(TRAIN_SCRIPT),
@@ -392,6 +545,8 @@ def _training_command(
         f"training.seed={seed}",
         "training.device=cuda:0",
         f"training.num_epochs={epochs}",
+        f"dataloader.batch_size={batch_size}",
+        f"optimizer.learning_rate={learning_rate:g}",
         "policy.temporal_embedding_cache_enabled="
         f"{str(temporal_embedding_cache).lower()}",
         f"policy.temporal_embedding_cache_start_epoch={cache_start_epoch}",
@@ -406,7 +561,55 @@ def _training_command(
         f"{history_decoder_hidden_dim}",
         "policy.history_reconstruction.num_hidden_layers="
         f"{history_decoder_hidden_layers}",
+        "policy.temporal_multi_image_fusion_enabled="
+        f"{str(temporal_multi_image_fusion).lower()}",
     ]
+    if val_batch_size is not None:
+        command.append(f"val_dataloader.batch_size={val_batch_size}")
+    if lr_scheduler is not None:
+        command.append(f"training.lr_scheduler={lr_scheduler}")
+    if lr_warmup_steps is not None:
+        command.append(f"training.lr_warmup_steps={lr_warmup_steps}")
+    if temporal_rgb_keys:
+        command.append("policy.temporal_rgb_keys=[" + ",".join(temporal_rgb_keys) + "]")
+    return f"{_environment_prefix(gpu)} {shlex.join(command)}"
+
+
+def _ptp_training_command(
+    config_path: Path,
+    output_dir: Path,
+    seed: int,
+    gpu: str,
+    epochs: int,
+    batch_size: int,
+    val_batch_size: int | None,
+    learning_rate: float,
+    lr_scheduler: str | None,
+    lr_warmup_steps: int | None,
+) -> str:
+    """Build a PTP transformer launch using its direct Hydra config."""
+    command = [
+        sys.executable,
+        str(TRAIN_PY),
+        "--config-dir",
+        str(config_path.parent),
+        "--config-name",
+        config_path.stem,
+        f"hydra.run.dir={output_dir}",
+        f"logging.name={output_dir.name}",
+        "logging.id=null",
+        f"training.seed={seed}",
+        "training.device=cuda:0",
+        f"training.num_epochs={epochs}",
+        f"dataloader.batch_size={batch_size}",
+        f"optimizer.learning_rate={learning_rate:g}",
+    ]
+    if val_batch_size is not None:
+        command.append(f"val_dataloader.batch_size={val_batch_size}")
+    if lr_scheduler is not None:
+        command.append(f"training.lr_scheduler={lr_scheduler}")
+    if lr_warmup_steps is not None:
+        command.append(f"training.lr_warmup_steps={lr_warmup_steps}")
     return f"{_environment_prefix(gpu)} {shlex.join(command)}"
 
 
@@ -459,6 +662,14 @@ def _start_training(with_evaluation: bool) -> None:
     gpu = _prompt_gpu()
     epochs = _prompt_int(
         "Training epochs", default=_config_default_epochs(task), minimum=1)
+    config_path = REPO_ROOT / "experiment_configs" / LAUNCHER_EPOCH_CONFIGS[task]
+    (
+        batch_size,
+        val_batch_size,
+        learning_rate,
+        lr_scheduler,
+        lr_warmup_steps,
+    ) = _prompt_optimization_parameters(config_path)
     history_decoder_samples = _prompt_int(
         "History samples per LTE decoder reconstruction", default=16, minimum=1
     )
@@ -477,6 +688,31 @@ def _start_training(with_evaluation: bool) -> None:
     history_decoder_hidden_layers = _prompt_int(
         "LTE history decoder hidden layers", default=1, minimum=1
     )
+    temporal_multi_image_fusion = _prompt_bool(
+        "Fuse multiple RGB cameras into LTE", default=False
+    )
+    primary_rgb_key, available_rgb_keys = _lte_rgb_keys(task)
+    print(
+        "LTE RGB cameras: "
+        + ", ".join(available_rgb_keys)
+        + f" (single-camera default: {primary_rgb_key})"
+    )
+    temporal_rgb_keys: list[str] = [primary_rgb_key]
+    if temporal_multi_image_fusion:
+        raw_keys = input(
+            "LTE RGB keys (comma-separated; blank uses every RGB key): "
+        ).strip()
+        if raw_keys:
+            temporal_rgb_keys = [key.strip() for key in raw_keys.split(",") if key.strip()]
+        else:
+            temporal_rgb_keys = available_rgb_keys
+        if len(temporal_rgb_keys) < 2:
+            raise ValueError("Multi-image LTE requires at least two RGB keys.")
+        unknown_keys = set(temporal_rgb_keys) - set(available_rgb_keys)
+        if unknown_keys:
+            raise ValueError(
+                "Unknown LTE RGB key(s): " + ", ".join(sorted(unknown_keys))
+            )
     temporal_embedding_cache = _prompt_bool(
         "Cache detached LTE ResNet embeddings", default=base_task == "lh-square"
     )
@@ -537,6 +773,13 @@ def _start_training(with_evaluation: bool) -> None:
             cache_start_epoch=cache_start_epoch,
             cache_warmup_epochs=cache_warmup_epochs,
             cache_refresh_epochs=cache_refresh_epochs,
+            temporal_multi_image_fusion=temporal_multi_image_fusion,
+            temporal_rgb_keys=temporal_rgb_keys,
+            batch_size=batch_size,
+            val_batch_size=val_batch_size,
+            learning_rate=learning_rate,
+            lr_scheduler=lr_scheduler,
+            lr_warmup_steps=lr_warmup_steps,
         )
         if with_evaluation:
             checkpoint = output_dir / "checkpoints" / "latest.ckpt"
@@ -551,16 +794,77 @@ def _start_training(with_evaluation: bool) -> None:
     _start_screen_session(_make_screen_session(label), " && ".join(commands))
 
 
+def _start_ptp_training(with_evaluation: bool) -> None:
+    """Interactively start PTP training, optionally followed by evaluation."""
+    task = _prompt_menu("Select PTP task: ", list(PTP_TASK_CONFIGS))
+    config_path = PTP_TASK_CONFIGS[task]
+    gpu = _prompt_gpu()
+    epochs = _prompt_int(
+        "Training epochs", default=_config_path_default_epochs(config_path), minimum=1
+    )
+    (
+        batch_size,
+        val_batch_size,
+        learning_rate,
+        lr_scheduler,
+        lr_warmup_steps,
+    ) = _prompt_optimization_parameters(config_path)
+    runs = _planned_ptp_runs(task)
+    if with_evaluation:
+        n_test = _prompt_int("Evaluation test episodes", default=200, minimum=1)
+        test_start_seed = _prompt_int(
+            "Evaluation test-start seed", default=1000, minimum=0
+        )
+    else:
+        n_test = 0
+        test_start_seed = 0
+
+    commands = []
+    for seed, output_dir, inference_dir in runs:
+        train = _ptp_training_command(
+            config_path,
+            output_dir,
+            seed,
+            gpu,
+            epochs,
+            batch_size,
+            val_batch_size,
+            learning_rate,
+            lr_scheduler,
+            lr_warmup_steps,
+        )
+        if with_evaluation:
+            evaluate = _evaluation_command(
+                output_dir / "checkpoints" / "latest.ckpt",
+                inference_dir,
+                test_start_seed,
+                gpu,
+                n_test,
+                record_zarr=True,
+            )
+            commands.append(f"{train} && {evaluate}")
+        else:
+            commands.append(train)
+    label = f"ptp-{'train-eval' if with_evaluation else 'train'}-{task}-x{len(runs)}"
+    _start_screen_session(_make_screen_session(label), " && ".join(commands))
+
+
+def _start_training_flow(with_evaluation: bool) -> None:
+    """Select between the LTE and PTP training workflows."""
+    method = _prompt_menu("Select training method: ", ["LTE-IMG-NoT", "PTP"])
+    if method == "PTP":
+        _start_ptp_training(with_evaluation)
+    else:
+        _start_training(with_evaluation)
+
+
 def _available_evaluation_runs() -> list[Path]:
     """Return training directories that have at least one selectable checkpoint."""
-    root = REPO_ROOT / "data" / "outputs"
-    if not root.is_dir():
-        return []
     return sorted(
         (
-            checkpoint_dir.parent
-            for checkpoint_dir in root.glob("**/checkpoints")
-            if any(checkpoint_dir.glob("*.ckpt"))
+            run_dir
+            for run_dir in _training_run_directories()
+            if any((run_dir / "checkpoints").glob("*.ckpt"))
         ),
         key=lambda path: str(path),
     )
@@ -569,7 +873,7 @@ def _available_evaluation_runs() -> list[Path]:
 def _prompt_evaluation_run() -> Path:
     runs = _available_evaluation_runs()
     if not runs:
-        raise RuntimeError("No training runs with checkpoints found under data/outputs.")
+        raise RuntimeError("No training runs with checkpoints found in either output root.")
     labels = [str(run.relative_to(REPO_ROOT)) for run in runs]
     selected = _prompt_menu("Select training run: ", labels)
     return runs[labels.index(selected)]
@@ -879,15 +1183,15 @@ def _print_training_progress_table(rows: list[tuple[str, str, str, str, str, str
 
 def _show_progress() -> None:
     """Print compact, user-facing train and evaluation progress."""
-    output_root = REPO_ROOT / "data" / "outputs"
-    if output_root.is_dir():
-        train_logs = sorted(
-            output_root.glob("*/logs.json.txt"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-    else:
-        train_logs = []
+    train_logs = sorted(
+        (
+            run_dir / "logs.json.txt"
+            for run_dir in _training_run_directories()
+            if (run_dir / "logs.json.txt").is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
     training_entries = []
     for path in train_logs:
         epoch = _latest_epoch(path)
@@ -1184,10 +1488,9 @@ def _delete_run_directory() -> None:
     # instead of calling ``relative_to`` on the resolved path.
     target_description = display_root / selected_name
     success_message = f"Deleted training run directory {target_description}."
-    confirmation = input(
-        f"Type '{selected_name}' to permanently delete {target_description}: "
-    ).strip()
-    if confirmation != selected_name:
+    if not _prompt_bool(
+        f"Permanently delete {target_description}", default=False
+    ):
         print("Deletion cancelled.")
         return
     shutil.rmtree(target)
@@ -1227,10 +1530,9 @@ def _delete_inference_directory() -> None:
 
     selected_name = inference_dir.name
     target_description = display_root / selected_name
-    confirmation = input(
-        f"Type '{selected_name}' to permanently delete {target_description}: "
-    ).strip()
-    if confirmation != selected_name:
+    if not _prompt_bool(
+        f"Permanently delete {target_description}", default=False
+    ):
         print("Deletion cancelled.")
         return
     shutil.rmtree(inference_dir)
@@ -1373,13 +1675,145 @@ def _show_gpu_memory_by_process() -> None:
         print(f"  {memory_mib:>6} MiB | PID {pid:<7} | {command}")
 
 
+def _wandb_run_folder_artifacts() -> tuple[object, list[tuple[object, object]]]:
+    """Select W&B runs that have a completed, downloadable run-folder artifact."""
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb is required; run the experiment CLI in the LDP Conda environment."
+        ) from exc
+
+    api = wandb.Api()
+    entity = api.default_entity
+    project = _prompt_text("W&B project", "ldp_temporal_diffusion_policy")
+
+    def find_in_project(project_name: str) -> list[tuple[object, object]]:
+        try:
+            runs = api.runs(f"{entity}/{project_name}", per_page=100)
+        except Exception:
+            return []
+        found = []
+        for run in runs:
+            try:
+                artifacts = list(run.logged_artifacts())
+            except Exception:
+                continue
+            for artifact in artifacts:
+                if artifact.type == "run-folder":
+                    found.append((run, artifact))
+        return found
+
+    candidates = find_in_project(project)
+    if candidates:
+        return wandb, candidates
+
+    print(
+        f"No run-folder artifacts found in {entity}/{project}; "
+        "searching your other W&B projects."
+    )
+    try:
+        project_names = sorted(
+            project_item.name for project_item in api.projects(entity)
+            if project_item.name != project
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Could not list W&B projects for {entity}: {exc}") from exc
+    for project_name in project_names:
+        candidates.extend(find_in_project(project_name))
+    if not candidates:
+        raise RuntimeError(
+            f"No W&B run-folder artifacts found under {entity}."
+        )
+    return wandb, candidates
+
+
+def _regular_file_inventory(root: Path) -> tuple[int, int]:
+    """Return count and bytes for artifact files, excluding non-portable links."""
+    files = [path for path in root.rglob("*") if path.is_file() and not path.is_symlink()]
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+def _restore_wandb_run_folder() -> None:
+    """Restore a W&B run folder externally, then remove its remote checkpoints."""
+    _, candidates = _wandb_run_folder_artifacts()
+    labels = []
+    for run, artifact in candidates:
+        output_name = artifact.metadata.get("output_dir_name", artifact.name)
+        labels.append(f"{run.name} [{run.id}]  ->  {output_name}")
+    selected_label = _prompt_menu("Select W&B run folder: ", labels)
+    run, folder_artifact = candidates[labels.index(selected_label)]
+
+    output_name = str(
+        folder_artifact.metadata.get("output_dir_name", folder_artifact.name)
+    )
+    output_name = output_name.split(":", 1)[0]
+    destination = _next_available_path(EXTERNAL_OUTPUT_ROOT / output_name)
+    print(f"Downloading {run.name} to {destination.relative_to(REPO_ROOT)}")
+    try:
+        folder_artifact.download(root=str(destination))
+    except Exception as exc:
+        raise RuntimeError(
+            "W&B folder download failed; remote artifacts were not deleted: " f"{exc}"
+        ) from exc
+
+    actual_file_count, actual_byte_count = _regular_file_inventory(destination)
+    expected_file_count = folder_artifact.metadata.get("file_count")
+    expected_byte_count = folder_artifact.metadata.get("byte_count")
+    if expected_file_count is not None and actual_file_count != int(expected_file_count):
+        raise RuntimeError(
+            f"Downloaded {actual_file_count} files, expected {expected_file_count}; "
+            "remote artifacts were not deleted."
+        )
+    if expected_byte_count is not None and actual_byte_count != int(expected_byte_count):
+        raise RuntimeError(
+            f"Downloaded {_human_size(actual_byte_count)}, expected "
+            f"{_human_size(int(expected_byte_count))}; remote artifacts were not deleted."
+        )
+    checkpoints = sorted((destination / "checkpoints").glob("*.ckpt"))
+    if not checkpoints:
+        raise RuntimeError(
+            "Downloaded folder contains no checkpoints; remote artifacts were not deleted."
+        )
+
+    try:
+        run_artifacts = list(run.logged_artifacts())
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not enumerate remote artifacts; none were deleted: {exc}"
+        ) from exc
+    checkpoint_artifacts = [
+        artifact for artifact in run_artifacts
+        if artifact.type in {"model", "run-folder"}
+    ]
+    if not checkpoint_artifacts:
+        raise RuntimeError("No remote checkpoint artifacts found to delete.")
+    artifact_names = ", ".join(artifact.name for artifact in checkpoint_artifacts)
+    if not _prompt_bool(
+        f"Delete W&B checkpoint artifacts after verified download ({artifact_names})",
+        default=True,
+    ):
+        print("Downloaded folder kept; W&B checkpoint artifacts were not deleted.")
+        return
+
+    for artifact in checkpoint_artifacts:
+        artifact.delete(delete_aliases=True)
+    print(
+        f"Restored {destination.relative_to(REPO_ROOT)} with {len(checkpoints)} "
+        f"checkpoints, then deleted {len(checkpoint_artifacts)} W&B checkpoint artifact(s)."
+    )
+
+
 def _saved_training_runs() -> list[Path]:
-    """Find train outputs that retain a resolved Hydra config."""
-    output_root = REPO_ROOT / "data" / "outputs"
-    if not output_root.is_dir():
-        return []
+    """Find train outputs retaining either final or legacy Hydra configs."""
+    runs = {
+        run_dir
+        for run_dir in _training_run_directories()
+        if (run_dir / "final_resolved_config.yaml").is_file()
+        or (run_dir / ".hydra" / "config.yaml").is_file()
+    }
     return sorted(
-        (config_path.parent.parent for config_path in output_root.glob("**/.hydra/config.yaml")),
+        runs,
         key=lambda path: path.name,
     )
 
@@ -1473,12 +1907,20 @@ def _resolve_hydra_config_leaves(config: object, raw_value: object, prefix: str 
         return raw_value
 
 
-def _load_hydra_config(run_dir: Path) -> dict:
-    """Load effective saved values, resolving interpolations per parameter."""
+def _load_saved_run_config(run_dir: Path) -> dict:
+    """Load a direct final config, or resolve the legacy Hydra snapshot."""
     try:
         from omegaconf import OmegaConf
     except ImportError as exc:
         raise RuntimeError("OmegaConf is required to compare saved Hydra configs.") from exc
+    final_config_path = run_dir / "final_resolved_config.yaml"
+    if final_config_path.is_file():
+        config = OmegaConf.load(final_config_path)
+        loaded_config = OmegaConf.to_container(config, resolve=True)
+        if not isinstance(loaded_config, dict):
+            raise ValueError(f"Expected a mapping in {final_config_path}.")
+        return loaded_config
+
     # The config snapshot has already had the recorded ``overrides.yaml``
     # values composed into it. Register the project resolver so expressions
     # such as ``${eval:'${n_action_steps}+${n_latency_steps}'}`` resolve too.
@@ -1519,8 +1961,8 @@ def _config_value_label(value: object, max_length: int = 56) -> str:
 
 
 def _print_config_diff(first_run: Path, second_run: Path) -> None:
-    first_config = _flatten_config(_load_hydra_config(first_run))
-    second_config = _flatten_config(_load_hydra_config(second_run))
+    first_config = _flatten_config(_load_saved_run_config(first_run))
+    second_config = _flatten_config(_load_saved_run_config(second_run))
     differences = []
     for key in sorted(set(first_config) | set(second_config)):
         first_value = first_config.get(key, _CONFIG_MISSING)
@@ -1559,7 +2001,7 @@ def _compare_run_configs() -> None:
     if run_kind == "training runs":
         runs = _saved_training_runs()
         if len(runs) < 2:
-            print("Need at least two saved training runs with .hydra/config.yaml.")
+            print("Need at least two saved training runs with saved configs.")
             return
         first_index, second_index = _select_two_run_indices(
             "training run", [run.name for run in runs]
@@ -1592,6 +2034,7 @@ def main() -> None:
                 "delete training run directories",
                 "delete inference directories",
                 "compress inference images to videos",
+                "restore W&B run folder to external outputs",
                 "show disk usage",
                 "show GPU status (nvidia-smi)",
                 "show GPU memory by process",
@@ -1603,11 +2046,11 @@ def main() -> None:
             return
         try:
             if action == "train":
-                _start_training(with_evaluation=False)
+                _start_training_flow(with_evaluation=False)
             elif action == "eval":
                 _start_evaluation()
             elif action == "train+eval":
-                _start_training(with_evaluation=True)
+                _start_training_flow(with_evaluation=True)
             elif action == "progress":
                 _show_progress()
             elif action == "add run note":
@@ -1620,6 +2063,8 @@ def main() -> None:
                 _delete_inference_directory()
             elif action == "compress inference images to videos":
                 _compress_inference_images_to_videos()
+            elif action == "restore W&B run folder to external outputs":
+                _restore_wandb_run_folder()
             elif action == "show disk usage":
                 _show_disk_usage()
             elif action == "show GPU status (nvidia-smi)":

@@ -8,8 +8,12 @@ from diffusion_policy.dataset.temporal_zarr_image_dataset import (
 )
 from diffusion_policy.model.temporal.image_no_time import (
     ImageHistoryDecoder,
+    ImageNoTimeTemporalEncoder,
+    MultiImageEmbeddingFusion,
+    MultiImageHistoryDecoder,
     _interpolate_past_embeddings,
     image_history_reconstruction_loss,
+    multi_image_history_reconstruction_loss,
 )
 
 
@@ -81,3 +85,22 @@ def test_lte_image_history_reconstruction_uses_only_causal_prefix():
     loss.backward()
     assert latents.grad is not None
     assert decoder.mlp[0].weight.grad is not None
+
+
+def test_multi_image_lte_fuses_any_number_of_views_with_per_view_heads():
+    fusion = MultiImageEmbeddingFusion([2, 3, 4], output_dim=5, hidden_dim=7)
+    encoder = ImageNoTimeTemporalEncoder(5, latent_dim=6, hidden_dim=8)
+    decoder = MultiImageHistoryDecoder(6, [2, 3, 4], hidden_dim=9)
+    histories = [torch.randn(1, 4, dim) for dim in (2, 3, 4)]
+    fused = fusion(histories)
+    states = encoder.encode_history(fused)
+    selected = states[:, [2, 3]]
+    loss = multi_image_history_reconstruction_loss(
+        decoder, selected, histories, torch.tensor([[2, 3]]), num_history_queries=3
+    )
+
+    assert fused.shape == (1, 4, 5)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert fusion.mlp[0].weight.grad is not None
+    assert all(head.weight.grad is not None for head in decoder.heads)

@@ -45,6 +45,15 @@ policy:
   n_obs_steps: ${n_obs_steps}
   temporal_image_hdf5_path: ${task.dataset.dataset_path}
   temporal_rgb_key: ${task.lte_temporal_rgb_key}
+  # Always name the camera(s) consumed by LTE, so the composed config is the
+  # full experiment specification. The CLI expands this to every selected RGB
+  # key for a multi-camera run.
+  temporal_rgb_keys: ["${task.lte_temporal_rgb_key}"]
+  temporal_multi_image_fusion_enabled: false
+  # ResNet-18's visual feature width. These are inert unless fusion is enabled,
+  # but remain explicit to make configuration comparisons meaningful.
+  temporal_multi_image_fusion_dim: 512
+  temporal_multi_image_fusion_hidden_dim: 512
   # Match the original LTE data path by caching the selected camera once in RAM.
   temporal_image_cache_in_memory: true
   temporal_latent_dim: 32

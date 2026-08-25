@@ -28,6 +28,10 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
+from diffusion_policy.common.wandb_checkpoint import (
+    sync_checkpoints_to_wandb,
+    sync_run_folder_to_wandb,
+)
 from hsic import batch_hsic
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -339,7 +343,20 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                     # We can't copy the last checkpoint here
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                    if topk_manager.monitor_key not in metric_dict:
+                        # Some configs save ``latest.ckpt`` more often than
+                        # they run rollouts.  Their ranked checkpoint metric
+                        # (for example ``test_mean_score``) is therefore not
+                        # available on every checkpoint epoch.  Preserve the
+                        # latest checkpoint and wait for the next epoch that
+                        # provides the ranking metric instead of aborting.
+                        print(
+                            "Skipping ranked checkpoint: missing monitor "
+                            f"{topk_manager.monitor_key!r}."
+                        )
+                        topk_ckpt_path = None
+                    else:
+                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
@@ -352,6 +369,38 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
+
+        # Save the actual completed model rather than only the most recent
+        # scheduled checkpoint, then upload every retained checkpoint after
+        # pending background writes have completed.
+        if self._saving_thread is not None:
+            self._saving_thread.join()
+        final_checkpoint = self.save_checkpoint(use_thread=False)
+        try:
+            checkpoint_count = sync_checkpoints_to_wandb(
+                wandb,
+                wandb_run,
+                output_dir=self.output_dir,
+                checkpoint_dir=pathlib.Path(final_checkpoint).parent,
+                epoch=self.epoch,
+            )
+            print(f"Synced {checkpoint_count} checkpoints to Weights & Biases.")
+            file_count = sync_run_folder_to_wandb(
+                wandb,
+                wandb_run,
+                output_dir=self.output_dir,
+                epoch=self.epoch,
+            )
+            print(f"Synced {file_count} run-folder files to Weights & Biases.")
+        except Exception as error:
+            # A W&B/network failure should not make an otherwise successful
+            # train (or train+eval) screen command fail.
+            print(f"Could not sync checkpoints to Weights & Biases: {error}")
+        finally:
+            try:
+                wandb_run.finish()
+            except Exception as error:
+                print(f"Could not finish Weights & Biases run: {error}")
 
 @hydra.main(
     version_base=None,

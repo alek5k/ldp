@@ -10,12 +10,19 @@ sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 import pathlib
-from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+
+def _write_final_resolved_config(cfg: OmegaConf) -> None:
+    """Persist the complete, interpolation-free Hydra configuration."""
+    output_path = pathlib.Path(HydraConfig.get().runtime.output_dir) / "final_resolved_config.yaml"
+    OmegaConf.save(config=cfg, f=output_path, resolve=True)
+    print(f"Wrote final resolved config: {output_path}")
 
 @hydra.main(
     version_base=None,
@@ -28,7 +35,8 @@ def main(cfg: OmegaConf):
     OmegaConf.resolve(cfg)
     print(OmegaConf.to_yaml(cfg))
     cls = hydra.utils.get_class(cfg._target_)
-    workspace: BaseWorkspace = cls(cfg)
+    workspace = cls(cfg)
+    _write_final_resolved_config(cfg)
     workspace.run()
 
 if __name__ == "__main__":

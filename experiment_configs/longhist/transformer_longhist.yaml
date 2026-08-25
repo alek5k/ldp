@@ -37,7 +37,7 @@ logging:
   id: null
   mode: online
   name: ptp_square_long
-  project: diffusion_longhist
+  project: ldp_temporal_diffusion_policy
   resume: true
   tags:
   - train_diffusion_transformer_hybrid
@@ -263,7 +263,7 @@ task:
   task_name: square_long
 task_name: square_long_image
 training:
-  checkpoint_every: 10
+  checkpoint_every: 50
   debug: false
   device: cuda:0
   gradient_accumulate_every: 1

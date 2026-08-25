@@ -39,6 +39,10 @@ class DiffusionTransformerLTEImagePolicy(
         temporal_image_hdf5_path: str | None = None,
         temporal_image_cache_in_memory: bool = False,
         temporal_rgb_key: str | None = None,
+        temporal_rgb_keys: list[str] | None = None,
+        temporal_multi_image_fusion_enabled: bool = False,
+        temporal_multi_image_fusion_dim: int | None = None,
+        temporal_multi_image_fusion_hidden_dim: int | None = None,
         temporal_latent_dim: int = 32,
         temporal_hidden_dim: int = 128,
         temporal_recurrent: bool = True,
@@ -101,6 +105,10 @@ class DiffusionTransformerLTEImagePolicy(
         self._init_lte_temporal(
             shape_meta=shape_meta,
             temporal_rgb_key=temporal_rgb_key,
+            temporal_rgb_keys=temporal_rgb_keys,
+            temporal_multi_image_fusion_enabled=temporal_multi_image_fusion_enabled,
+            temporal_multi_image_fusion_dim=temporal_multi_image_fusion_dim,
+            temporal_multi_image_fusion_hidden_dim=temporal_multi_image_fusion_hidden_dim,
             temporal_latent_dim=temporal_latent_dim,
             temporal_hidden_dim=temporal_hidden_dim,
             temporal_recurrent=temporal_recurrent,
@@ -136,15 +144,19 @@ class DiffusionTransformerLTEImagePolicy(
             n_cond_layers=n_cond_layers,
         )
 
-    def _temporal_image_embedding_dim(self) -> int:
-        encoder = self.obs_encoder.obs_nets[self.temporal_rgb_key]
+    def _temporal_image_embedding_dim(self, key: str | None = None) -> int:
+        key = self.temporal_rgb_key if key is None else key
+        encoder = self.obs_encoder.obs_nets[key]
         return int(encoder.output_shape(encoder.input_shape)[0])
 
-    def _encode_temporal_images(self, images: torch.Tensor) -> torch.Tensor:
+    def _encode_temporal_images(
+        self, images: torch.Tensor, key: str | None = None
+    ) -> torch.Tensor:
         # Apply exactly the selected camera's Robomimic preprocessing and
         # visual core; this is the transformer analogue of the LTE ResNet path.
-        randomizer = self.obs_encoder.obs_randomizers[self.temporal_rgb_key]
-        encoder = self.obs_encoder.obs_nets[self.temporal_rgb_key]
+        key = self.temporal_rgb_key if key is None else key
+        randomizer = self.obs_encoder.obs_randomizers[key]
+        encoder = self.obs_encoder.obs_nets[key]
         return encoder(randomizer(images))
 
     def _condition_features(

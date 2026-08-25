@@ -37,7 +37,7 @@ logging:
   id: null
   mode: online
   name: ptp_aloha
-  project: diffusion_aloha
+  project: ldp_temporal_diffusion_policy
   resume: true
   tags:
   - train_diffusion_transformer_hybrid
