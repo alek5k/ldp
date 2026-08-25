@@ -406,7 +406,11 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         comb_data = np.concatenate([past_data, future_data])
         data["action"] = comb_data
         torch_data = {
-            'obs': dict_apply(obs_dict, torch.from_numpy),
+            'obs': dict_apply(
+                obs_dict,
+                lambda value: value if isinstance(value, torch.Tensor)
+                else torch.from_numpy(value),
+            ),
             'action': torch.from_numpy(data['action'].astype(np.float32))
         }
         if self.return_temporal_history:
