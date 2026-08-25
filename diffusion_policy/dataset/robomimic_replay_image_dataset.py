@@ -89,6 +89,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             elif type == 'low_dim' and key != "embedding":
                 lowdim_keys.append(key)
         self.cache_images_on_gpu = bool(cache_images_on_gpu)
+        self._return_gpu_image_indices = self.cache_images_on_gpu
         self.cache_images_in_memory = bool(cache_images_in_memory) or self.cache_images_on_gpu
 
         replay_buffer = None
@@ -258,6 +259,12 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         val_set.train_mask = ~self.train_mask
         return val_set
 
+    def __getstate__(self):
+        """Do not serialize CUDA storage into spawned DataLoader workers."""
+        state = self.__dict__.copy()
+        state['_gpu_image_cache'] = None
+        return state
+
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
 
@@ -365,7 +372,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
 
         gpu_image_indices = (
             self._cached_observation_image_indices(idx)
-            if self._gpu_image_cache is not None else None
+            if self._return_gpu_image_indices else None
         )
 
         for key in rgb_keys:

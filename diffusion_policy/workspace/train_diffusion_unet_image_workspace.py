@@ -10,7 +10,7 @@ if __name__ == "__main__":
 import os
 import hydra
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 import pathlib
 from torch.utils.data import DataLoader
 import copy
@@ -75,12 +75,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         assert isinstance(dataset, BaseImageDataset)
         if getattr(dataset, "cache_images_on_gpu", False):
             for loader_cfg in (cfg.dataloader, cfg.val_dataloader):
-                loader_cfg.num_workers = 0
-                loader_cfg.persistent_workers = False
-                loader_cfg.pin_memory = False
-                if "prefetch_factor" in loader_cfg:
-                    del loader_cfg["prefetch_factor"]
-            print("Raw image GPU cache: forcing DataLoader workers to 0.")
+                if loader_cfg.num_workers > 0:
+                    with open_dict(loader_cfg):
+                        loader_cfg.multiprocessing_context = "spawn"
+            print("Raw image GPU cache: workers prepare CPU indices; GPU gather stays in the parent process.")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
