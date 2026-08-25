@@ -674,16 +674,16 @@ def _start_training(with_evaluation: bool) -> None:
         "History samples per LTE decoder reconstruction", default=16, minimum=1
     )
     temporal_latent_dim = _prompt_int(
-        "LTE temporal encoder latent dimension", default=32, minimum=1
+        "LTE temporal encoder latent dimension", default=64, minimum=1
     )
     temporal_encoder_hidden_dim = _prompt_int(
-        "LTE temporal encoder hidden dimension", default=128, minimum=1
+        "LTE temporal encoder hidden dimension", default=256, minimum=1
     )
     temporal_encoder_hidden_layers = _prompt_int(
         "LTE temporal encoder hidden layers", default=1, minimum=1
     )
     history_decoder_hidden_dim = _prompt_int(
-        "LTE history decoder hidden dimension", default=128, minimum=1
+        "LTE history decoder hidden dimension", default=256, minimum=1
     )
     history_decoder_hidden_layers = _prompt_int(
         "LTE history decoder hidden layers", default=1, minimum=1

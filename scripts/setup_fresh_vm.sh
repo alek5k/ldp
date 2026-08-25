@@ -1,112 +1,86 @@
 #!/usr/bin/env bash
-# Fresh Ubuntu VM setup for LDP.
-#
-# Before running, edit the QUICK CONFIGURATION block below. Do not commit a
-# copy containing real tokens or private-key paths.
-#
-# Run from a copied file on the new VM:
-#   bash setup_fresh_vm.sh
+# Fresh Ubuntu VM setup for LDP. Edit the QUICK CONFIGURATION block, then run
+# this copied script on the new VM.
 
 set -Eeuo pipefail
 umask 077
 
 ###############################################################################
 # QUICK CONFIGURATION -- normally the only section you need to edit.
-# Do not commit a copy containing real tokens or private keys.
 ###############################################################################
 
-# Dataset to fetch from the links documented in README.md. Supported values:
-#   none | square | tool-hang | transport | lh-aloha | lh-square
-# square, tool-hang, and transport share the Robomimic image archive.
-# WaitAtGoal, LiftQA, PianoSim, and PushT have no public download link in this
-# README, so copy those datasets to DATA_ROOT separately.
-TARGET_ENVIRONMENT="lh-aloha"
-TRAINING_METHOD="lte"                # lte | ptp (PTP supports lh-aloha/lh-square)
-
-# GitHub / W&B credentials. Use a fine-grained GitHub token with repository
-# Contents: Read access. It is supplied through a temporary askpass helper and
-# never written into the Git remote URL or Git configuration.
+# Auth Tokens
 GITHUB_TOKEN=""
 WANDB_API_KEY=""
-NTFY_AUTH_TOKEN=''
+NTFY_AUTH_TOKEN=""
 
-TRAIN_GPU="0"                        # Physical GPU index passed via CUDA_VISIBLE_DEVICES.
-TRAIN_EPOCHS=500
+TARGET_ENVIRONMENT="lh-aloha"         # square | transport | tool-hang | lh-aloha | lh-square | waitatgoal | liftqa
+TRAINING_METHOD="lte"                 # lte | ptp
+LTE_ARCHITECTURE="unet"               # transformer | unet
+LTE_IMAGE_COUNT=1                     # First N RGB cameras for the target environment.
+LTE_HISTORY_DECODER_SAMPLES=16
+LTE_TEMPORAL_LATENT_DIM=64
+LTE_TEMPORAL_HIDDEN_DIM=256
+LTE_TEMPORAL_HIDDEN_LAYERS=1
+LTE_HISTORY_DECODER_HIDDEN_DIM=256
+LTE_HISTORY_DECODER_HIDDEN_LAYERS=1
+LTE_EMBEDDING_CACHE=true
+LTE_CACHE_START_EPOCH=5
+LTE_CACHE_WARMUP_EPOCHS=20
+LTE_CACHE_REFRESH_EPOCHS=5
+
+
+TRAIN_GPU="0"
+TRAIN_EPOCHS=5
 TRAIN_BATCH_SIZE=64
 TRAIN_LEARNING_RATE="0.0001"
 TRAIN_SEED=42
 TRAIN_SEQUENTIAL_RUNS=1
+DOWNLOAD_OBS_ENCODERS=false
 
-# Requires sudo. Leave false for setup-only machines. `true` shuts down only
-# after the final requested training run exits successfully.
-SHUTDOWN_AFTER_SUCCESS=true
-SHUTDOWN_DELAY_MINUTES=0
+SHUTDOWN_AFTER_COMPLETION=false
 
 ###############################################################################
-# MACHINE CONFIGURATION -- change only when the VM layout differs.
+# MACHINE CONFIGURATION -- normally leave unchanged.
 ###############################################################################
-TRAIN_RUN_NAME=""                    # Blank: generate a timestamped name.
-TRAIN_OUTPUT_ROOT=""                 # Blank: external root if configured, else DATA_ROOT/outputs.
-TRAIN_CHECKPOINT_EVERY=""            # Blank: keep the selected config's value.
-TRAIN_ROLLOUT_EVERY=""               # Blank: keep the selected config's value.
 
-RUN_TRAINING=true
-DOWNLOAD_OBS_ENCODERS=false          # Also fetch the optional embedding encoders. (PTP)
-
-NTFY_SERVER=https://ntfy.aleksk.net
-NTFY_TOPIC="ldp"                     # Change if your ntfy token uses another topic.
-
-# Repository and install location.
 REPO_URL="https://github.com/alek5k/ldp.git"
 REPO_DIR="$HOME/ldp"
-
-# W&B organisation exported whenever the environment is activated.
 WANDB_ENTITY="uts_robot_lab"
-
-# Conda / Python environment.
+NTFY_SERVER="https://ntfy.aleksk.net"
+NTFY_TOPIC="ldp"
 CONDA_DIR="$HOME/miniforge3"
 CONDA_ENV_NAME="robodiff-lh-5090"
 CONDA_ENV_FILE="conda_environment.yaml"
-
-# Data locations. Put DATA_ROOT on a large mounted disk if desired. The script
-# makes REPO_DIR/data a symlink when it differs from DATA_ROOT.
 DATA_ROOT="$REPO_DIR/data"
-EXTERNAL_OUTPUT_ROOT=""             # Optional, e.g. /mnt/wdblack/ldp/data/outputs
+EXTERNAL_OUTPUT_ROOT=""
 
-# System setup. NVIDIA drivers are intentionally not installed: use the driver
-# supplied by your VM image / cloud provider, then verify it with nvidia-smi.
-INSTALL_SYSTEM_PACKAGES=true
-INSTALL_GIT_LFS=true
-
-###############################################################################
-# End configuration.
 ###############################################################################
 
 readonly MINIFORGE_VERSION="24.11.3-0"
 readonly MINIFORGE_BASE_URL="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}"
 
-log() {
-    printf '\n==> %s\n' "$*"
-}
+log() { printf '\n==> %s\n' "$*"; }
+warn() { printf '\nWARNING: %s\n' "$*" >&2; }
+as_root() { if [[ "${EUID}" -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-warn() {
-    printf '\nWARNING: %s\n' "$*" >&2
-}
-
-as_root() {
-    if [[ "${EUID}" -eq 0 ]]; then
-        "$@"
-    else
-        sudo "$@"
+on_exit() {
+    local exit_status=$?
+    trap - EXIT
+    set +e
+    [[ -n "${GIT_ASKPASS_FILE:-}" ]] && rm -f "${GIT_ASKPASS_FILE}" || true
+    if (( exit_status != 0 )); then
+        [[ -n "${NTFY_AUTH_TOKEN}" ]] && curl --fail --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer ${NTFY_AUTH_TOKEN}" -H "Title: LDP setup/training failed" -H "Tags: warning" \
+            --data-binary "LDP setup/training failed on $(hostname): exit_status=${exit_status}; env=${TARGET_ENVIRONMENT}; method=${TRAINING_METHOD}" \
+            "${NTFY_SERVER%/}/${NTFY_TOPIC}" || true
+        if [[ "${SHUTDOWN_AFTER_COMPLETION}" == "true" ]]; then
+            as_root shutdown -h now || true
+        fi
     fi
+    exit "${exit_status}"
 }
-
-cleanup() {
-    if [[ -n "${GIT_ASKPASS_FILE:-}" && -e "${GIT_ASKPASS_FILE}" ]]; then
-        rm -f "${GIT_ASKPASS_FILE}"
-    fi
-}
-trap cleanup EXIT
+trap on_exit EXIT
 
 configure_github_token_auth() {
     if [[ -z "${GITHUB_TOKEN}" || "${REPO_URL}" != https://github.com/* ]]; then
@@ -224,155 +198,50 @@ download_robomimic_image() {
     rm -f "${archive_path}"
 }
 
-training_output_root() {
-    if [[ -n "${TRAIN_OUTPUT_ROOT}" ]]; then
-        printf '%s\n' "${TRAIN_OUTPUT_ROOT}"
-    elif [[ -n "${EXTERNAL_OUTPUT_ROOT}" ]]; then
-        printf '%s\n' "${EXTERNAL_OUTPUT_ROOT}"
-    else
-        printf '%s\n' "${DATA_ROOT}/outputs"
-    fi
-}
-
 run_training() {
-    local output_root base_name run_name output_dir config_dir config_name train_task
-    local -a overrides
-
-    if [[ "${RUN_TRAINING}" != "true" ]]; then
-        return
-    fi
-    if [[ "${TARGET_ENVIRONMENT}" == "none" || -z "${TARGET_ENVIRONMENT}" ]]; then
-        echo "Set TARGET_ENVIRONMENT before setting RUN_TRAINING=true." >&2
-        exit 1
-    fi
-    if [[ "${TRAINING_METHOD}" != "lte" && "${TRAINING_METHOD}" != "ptp" ]]; then
-        echo "TRAINING_METHOD must be 'lte' or 'ptp'." >&2
-        exit 1
-    fi
-    if ! [[ "${TRAIN_GPU}" =~ ^[0-9]+$ && "${TRAIN_EPOCHS}" =~ ^[1-9][0-9]*$ \
-        && "${TRAIN_BATCH_SIZE}" =~ ^[1-9][0-9]*$ && "${TRAIN_SEED}" =~ ^[0-9]+$ \
-        && "${TRAIN_SEQUENTIAL_RUNS}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "TRAIN_GPU, TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_SEED, and TRAIN_SEQUENTIAL_RUNS must be valid integers." >&2
-        exit 1
-    fi
-
-    output_root="$(training_output_root)"
+    local output_root run_name output_dir train_task lte_keys
+    local -a overrides available
+    output_root="${EXTERNAL_OUTPUT_ROOT:-${DATA_ROOT}/outputs}"
     mkdir -p "${output_root}"
-    base_name="${TRAIN_RUN_NAME:-${TARGET_ENVIRONMENT//-/_}_${TRAINING_METHOD}_$(date +%Y%m%d_%H%M%S)}"
-    train_task="${TARGET_ENVIRONMENT}"
-    if [[ "${train_task}" == "tool-hang" ]]; then
-        train_task="tool_hang"
-    fi
-
-    for ((run_index = 0; run_index < TRAIN_SEQUENTIAL_RUNS; run_index++)); do
-        run_name="${base_name}"
-        if (( TRAIN_SEQUENTIAL_RUNS > 1 )); then
-            run_name+="-r$((run_index + 1))"
+    train_task="${TARGET_ENVIRONMENT/tool-hang/tool_hang}"
+    if [[ "${TRAINING_METHOD}" == lte ]]; then
+        if [[ "${LTE_ARCHITECTURE}" != transformer ]]; then
+            case "${train_task}" in square|tool_hang|transport|lh-aloha|lh-square) train_task+="-unet" ;; esac
         fi
-        output_dir="${output_root}/${run_name}"
-        if [[ -e "${output_dir}" ]]; then
-            echo "Training output directory already exists: ${output_dir}" >&2
-            exit 1
-        fi
-
-        overrides=(
-            "training.num_epochs=${TRAIN_EPOCHS}"
-            "training.seed=$((TRAIN_SEED + run_index))"
-            "training.device=cuda:0"
-            "dataloader.batch_size=${TRAIN_BATCH_SIZE}"
-            "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}"
-            "logging.name=${run_name}"
-        )
-        if [[ -n "${TRAIN_CHECKPOINT_EVERY}" ]]; then
-            overrides+=("training.checkpoint_every=${TRAIN_CHECKPOINT_EVERY}")
-        fi
-        if [[ -n "${TRAIN_ROLLOUT_EVERY}" ]]; then
-            overrides+=("training.rollout_every=${TRAIN_ROLLOUT_EVERY}")
-        fi
-
-        log "Starting ${TRAINING_METHOD} training: ${run_name}"
-        case "${TRAINING_METHOD}" in
-            lte)
-                overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
-                (
-                    cd "${REPO_DIR}"
-                    CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy \
-                        ./train_lte_img_not.sh "${train_task}" "${output_dir}" "${overrides[@]}"
-                )
-                ;;
-            ptp)
-                case "${TARGET_ENVIRONMENT}" in
-                    lh-aloha) config_dir="experiment_configs/aloha"; config_name="transformer_aloha" ;;
-                    lh-square) config_dir="experiment_configs/longhist"; config_name="transformer_longhist" ;;
-                    *)
-                        echo "PTP only supports TARGET_ENVIRONMENT=lh-aloha or lh-square." >&2
-                        exit 1
-                        ;;
-                esac
-                overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}")
-                (
-                    cd "${REPO_DIR}"
-                    CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy \
-                        python train.py --config-dir="${config_dir}" --config-name="${config_name}" \
-                        hydra.run.dir="${output_dir}" "${overrides[@]}"
-                )
-                ;;
+        case "${TARGET_ENVIRONMENT}" in
+            square|lh-square) available=(agentview_image robot0_eye_in_hand_image) ;;
+            tool-hang) available=(sideview_image robot0_eye_in_hand_image) ;;
+            transport) available=(shouldercamera0_image shouldercamera1_image robot0_eye_in_hand_image) ;;
+            lh-aloha) available=(top right_wrist) ;;
+            *) available=(image) ;;
         esac
+        lte_keys="$(IFS=,; echo "${available[*]:0:LTE_IMAGE_COUNT}")"
+    fi
+    for ((i=0;i<TRAIN_SEQUENTIAL_RUNS;i++)); do
+        run_name="${TARGET_ENVIRONMENT//-/_}_${TRAINING_METHOD}_$(date +%Y%m%d_%H%M%S)"
+        (( TRAIN_SEQUENTIAL_RUNS > 1 )) && run_name+="-r$((i+1))"
+        output_dir="${output_root}/${run_name}"
+        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "logging.name=${run_name}")
+        log "Starting ${TRAINING_METHOD} training: ${run_name}"
+        if [[ "${TRAINING_METHOD}" == lte ]]; then
+            [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
+            overrides+=("policy.temporal_rgb_keys=[${lte_keys}]" "policy.temporal_multi_image_fusion_enabled=$([[ "${lte_keys}" == *,* ]] && echo true || echo false)" "policy.temporal_embedding_cache_enabled=${LTE_EMBEDDING_CACHE}" "policy.temporal_embedding_cache_start_epoch=${LTE_CACHE_START_EPOCH}" "policy.temporal_embedding_cache_warmup_epochs=${LTE_CACHE_WARMUP_EPOCHS}" "policy.temporal_embedding_cache_refresh_epochs=${LTE_CACHE_REFRESH_EPOCHS}" "policy.history_reconstruction.num_history_queries=${LTE_HISTORY_DECODER_SAMPLES}" "policy.temporal_latent_dim=${LTE_TEMPORAL_LATENT_DIM}" "policy.temporal_hidden_dim=${LTE_TEMPORAL_HIDDEN_DIM}" "policy.temporal_num_hidden_layers=${LTE_TEMPORAL_HIDDEN_LAYERS}" "policy.history_reconstruction.hidden_dim=${LTE_HISTORY_DECODER_HIDDEN_DIM}" "policy.history_reconstruction.num_hidden_layers=${LTE_HISTORY_DECODER_HIDDEN_LAYERS}")
+            (cd "${REPO_DIR}"; CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy ./train_lte_img_not.sh "${train_task}" "${output_dir}" "${overrides[@]}")
+        else
+            case "${TARGET_ENVIRONMENT}" in lh-aloha) config_dir=experiment_configs/aloha; config_name=transformer_aloha ;; *) config_dir=experiment_configs/longhist; config_name=transformer_longhist ;; esac
+            (cd "${REPO_DIR}"; CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy python train.py --config-dir="${config_dir}" --config-name="${config_name}" hydra.run.dir="${output_dir}" "optimizer.learning_rate=${TRAIN_LEARNING_RATE}" "${overrides[@]}")
+        fi
     done
 }
 
-notify_training_complete() {
-    local message
-
-    if [[ "${RUN_TRAINING}" != "true" ]]; then
-        return
-    fi
-    if [[ -z "${NTFY_AUTH_TOKEN}" ]]; then
-        warn "NTFY_AUTH_TOKEN is blank; skipping training-complete notification."
-        return
-    fi
-    if ! command -v curl >/dev/null 2>&1; then
-        warn "curl is unavailable; skipping training-complete notification."
-        return
-    fi
-
-    message="LDP training complete on $(hostname): env=${TARGET_ENVIRONMENT}, method=${TRAINING_METHOD}, runs=${TRAIN_SEQUENTIAL_RUNS}, output=$(training_output_root)"
-    if ! curl --fail --silent --show-error --max-time 20 \
-        -H "Authorization: Bearer ${NTFY_AUTH_TOKEN}" \
-        -H "Title: LDP training complete" \
-        -H "Tags: white_check_mark" \
-        --data-binary "${message}" \
-        "${NTFY_SERVER%/}/${NTFY_TOPIC}"; then
-        warn "Could not send the ntfy completion notification."
-    fi
-}
-
-if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "This script currently supports Ubuntu/Debian Linux only." >&2
-    exit 1
-fi
-
-case "$(uname -m)" in
-    x86_64) MINIFORGE_ARCH="x86_64" ;;
-    aarch64|arm64) MINIFORGE_ARCH="aarch64" ;;
-    *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-if [[ "${INSTALL_SYSTEM_PACKAGES}" == "true" ]]; then
-    log "Installing Ubuntu system packages"
-    as_root apt-get update
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        build-essential ca-certificates cmake curl ffmpeg git git-lfs \
-        libegl1 libgl1 libglib2.0-0 libglfw3 libglew-dev libosmesa6-dev \
-        patchelf pkg-config rsync screen unzip wget
-fi
-
-if command -v nvidia-smi >/dev/null 2>&1; then
-    log "Detected NVIDIA driver"
-    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
-else
-    warn "nvidia-smi is unavailable. Install a compatible NVIDIA driver before GPU training."
-fi
+log "Installing system packages"
+as_root apt-get update
+as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential ca-certificates cmake curl ffmpeg git git-lfs \
+    libegl1 libgl1 libglib2.0-0 libglfw3 libglew-dev libosmesa6-dev \
+    patchelf pkg-config rsync screen unzip wget
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+MINIFORGE_ARCH="x86_64"
 
 if [[ ! -x "${CONDA_DIR}/bin/conda" ]]; then
     log "Installing Miniforge in ${CONDA_DIR}"
@@ -385,8 +254,6 @@ if [[ ! -x "${CONDA_DIR}/bin/conda" ]]; then
 fi
 
 source "${CONDA_DIR}/etc/profile.d/conda.sh"
-# Pytorch3D comes from its own channel while AV/FFmpeg comes from Conda Forge;
-# flexible priority lets the solver combine those compatible packages.
 conda config --set channel_priority flexible
 conda config --set solver libmamba || true
 
@@ -394,30 +261,19 @@ configure_github_token_auth
 
 if [[ -d "${REPO_DIR}/.git" ]]; then
     log "Updating existing checkout at ${REPO_DIR}"
-    git -C "${REPO_DIR}" fetch --tags origin
     git -C "${REPO_DIR}" pull --ff-only
 else
-    if [[ -e "${REPO_DIR}" ]]; then
-        echo "REPO_DIR already exists but is not a Git checkout: ${REPO_DIR}" >&2
-        exit 1
-    fi
-
     log "Cloning ${REPO_URL}"
     mkdir -p "$(dirname "${REPO_DIR}")"
     git clone "${REPO_URL}" "${REPO_DIR}"
 fi
 
 git -C "${REPO_DIR}" submodule update --init --recursive
-if [[ "${INSTALL_GIT_LFS}" == "true" ]] && command -v git-lfs >/dev/null 2>&1; then
-    git -C "${REPO_DIR}" lfs install --local
-    git -C "${REPO_DIR}" lfs pull
-fi
+git -C "${REPO_DIR}" lfs install --local
+git -C "${REPO_DIR}" lfs pull
+cd "${REPO_DIR}"
 
 ENV_FILE_PATH="${REPO_DIR}/${CONDA_ENV_FILE}"
-if [[ ! -f "${ENV_FILE_PATH}" ]]; then
-    echo "Conda environment file not found: ${ENV_FILE_PATH}" >&2
-    exit 1
-fi
 
 if conda env list | awk '{print $1}' | grep -Fxq "${CONDA_ENV_NAME}"; then
     log "Updating Conda environment ${CONDA_ENV_NAME}"
@@ -428,20 +284,9 @@ else
 fi
 
 log "Installing LDP package"
-conda run -n "${CONDA_ENV_NAME}" python -m pip install --upgrade pip setuptools wheel
-conda run -n "${CONDA_ENV_NAME}" python -m pip install -e "${REPO_DIR}"
-
-# Keep the chosen entity available to future `conda activate` shells without
-# storing the W&B API key in a project file.
-ENV_PREFIX="${CONDA_DIR}/envs/${CONDA_ENV_NAME}"
-mkdir -p "${ENV_PREFIX}/etc/conda/activate.d"
-cat >"${ENV_PREFIX}/etc/conda/activate.d/ldp-wandb.sh" <<EOF
-export WANDB_ENTITY="${WANDB_ENTITY}"
-EOF
 conda activate "${CONDA_ENV_NAME}"
-
-# requirements.txt is an exported environment snapshot containing paths from
-# the original machine. conda_environment.yaml above is the portable source.
+python -m pip install --upgrade pip 'setuptools<81' wheel
+python -m pip install -e .
 
 if [[ "${DATA_ROOT}" != "${REPO_DIR}/data" ]]; then
     mkdir -p "${DATA_ROOT}"
@@ -463,40 +308,18 @@ fi
 download_selected_dataset
 download_observation_encoders
 
-if [[ -n "${WANDB_API_KEY}" ]]; then
-    log "Logging into Weights & Biases"
-    export WANDB_API_KEY WANDB_ENTITY
-    python -c 'import os, wandb; wandb.login(key=os.environ["WANDB_API_KEY"], relogin=True)'
-else
-    warn "WANDB_API_KEY is blank; run 'conda activate ${CONDA_ENV_NAME} && wandb login' later."
-fi
+log "Logging into Weights & Biases"
+export WANDB_API_KEY WANDB_ENTITY
+python -c 'import os, wandb; wandb.login(key=os.environ["WANDB_API_KEY"], relogin=True)'
 
 log "Verifying the environment"
 python -c 'import torch, wandb, diffusion_policy; print(f"Python setup OK; torch={torch.__version__}; CUDA available={torch.cuda.is_available()}; wandb={wandb.__version__}")'
 
 run_training
-notify_training_complete
-
-if [[ "${SHUTDOWN_AFTER_SUCCESS}" == "true" ]]; then
-    if [[ "${RUN_TRAINING}" != "true" ]]; then
-        echo "SHUTDOWN_AFTER_SUCCESS=true requires RUN_TRAINING=true." >&2
-        exit 1
-    fi
-    if ! [[ "${SHUTDOWN_DELAY_MINUTES}" =~ ^[0-9]+$ ]]; then
-        echo "SHUTDOWN_DELAY_MINUTES must be a non-negative integer." >&2
-        exit 1
-    fi
-    log "All requested training completed successfully; shutting down in ${SHUTDOWN_DELAY_MINUTES} minute(s)"
-    as_root shutdown -h "+${SHUTDOWN_DELAY_MINUTES}"
+[[ -n "${NTFY_AUTH_TOKEN}" ]] && curl --fail --silent --show-error --max-time 20 \
+    -H "Authorization: Bearer ${NTFY_AUTH_TOKEN}" -H "Title: LDP training complete" -H "Tags: white_check_mark" \
+    --data-binary "LDP training complete on $(hostname): env=${TARGET_ENVIRONMENT}, method=${TRAINING_METHOD}, runs=${TRAIN_SEQUENTIAL_RUNS}, output=${EXTERNAL_OUTPUT_ROOT:-${DATA_ROOT}/outputs}" \
+    "${NTFY_SERVER%/}/${NTFY_TOPIC}" || true
+if [[ "${SHUTDOWN_AFTER_COMPLETION}" == "true" ]]; then
+    as_root shutdown -h now || true
 fi
-
-cat <<EOF
-
-Setup complete.
-
-Next shell:
-  source "${CONDA_DIR}/etc/profile.d/conda.sh"
-  conda activate "${CONDA_ENV_NAME}"
-  cd "${REPO_DIR}"
-  python experiment_cli.py
-EOF

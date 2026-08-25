@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 {square|tool_hang|transport|lh-aloha|lh-square}[[-unet]]|{waitatgoal|liftqa} [OUTPUT_DIR] [Hydra overrides...]" >&2
+    echo "Usage: $0 {square|tool_hang|transport|lh-aloha|lh-square}[[-unet]]|lh-square-transformer|{waitatgoal|liftqa} [OUTPUT_DIR] [Hydra overrides...]" >&2
     exit 2
 fi
 
@@ -12,7 +12,7 @@ case "$1" in
     transport) config_name=transport/lte_img_not_transformer ;;
     lh-aloha) config_name=aloha/lte_img_not_transformer ;;
     # Use the 16-step LTE U-Net preset by default for LH-Square.
-    lh-square) config_name=longhist/lte_img_not ;;
+    lh-square) config_name=longhist/lte_img_not_transformer ;;
     # WaitAtGoal currently has the LTE U-Net config only.
     waitatgoal|waitatgoal-unet) config_name=waitatgoal/lte_img_not ;;
     # LiftQA currently has the LTE U-Net config only.
