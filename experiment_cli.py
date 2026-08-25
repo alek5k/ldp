@@ -537,6 +537,7 @@ def _training_command(
     learning_rate: float,
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
+    image_augmentation: bool,
 ) -> str:
     command = [
         str(TRAIN_SCRIPT),
@@ -547,6 +548,8 @@ def _training_command(
         f"training.num_epochs={epochs}",
         f"dataloader.batch_size={batch_size}",
         f"optimizer.learning_rate={learning_rate:g}",
+        "+task.dataset.image_augmentation="
+        f"{str(image_augmentation).lower()}",
         "policy.temporal_embedding_cache_enabled="
         f"{str(temporal_embedding_cache).lower()}",
         f"policy.temporal_embedding_cache_start_epoch={cache_start_epoch}",
@@ -586,6 +589,7 @@ def _ptp_training_command(
     learning_rate: float,
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
+    image_augmentation: bool,
 ) -> str:
     """Build a PTP transformer launch using its direct Hydra config."""
     command = [
@@ -603,6 +607,8 @@ def _ptp_training_command(
         f"training.num_epochs={epochs}",
         f"dataloader.batch_size={batch_size}",
         f"optimizer.learning_rate={learning_rate:g}",
+        "+task.dataset.image_augmentation="
+        f"{str(image_augmentation).lower()}",
     ]
     if val_batch_size is not None:
         command.append(f"val_dataloader.batch_size={val_batch_size}")
@@ -716,6 +722,9 @@ def _start_training(with_evaluation: bool) -> None:
     temporal_embedding_cache = _prompt_bool(
         "Cache detached LTE ResNet embeddings", default=base_task == "lh-square"
     )
+    image_augmentation = _prompt_bool(
+        "Use ColorJitter image augmentation (can slow training)", default=False
+    )
     cache_start_epoch = 5
     cache_warmup_epochs = 20
     cache_refresh_epochs = 5
@@ -780,6 +789,7 @@ def _start_training(with_evaluation: bool) -> None:
             learning_rate=learning_rate,
             lr_scheduler=lr_scheduler,
             lr_warmup_steps=lr_warmup_steps,
+            image_augmentation=image_augmentation,
         )
         if with_evaluation:
             checkpoint = output_dir / "checkpoints" / "latest.ckpt"
@@ -809,6 +819,9 @@ def _start_ptp_training(with_evaluation: bool) -> None:
         lr_scheduler,
         lr_warmup_steps,
     ) = _prompt_optimization_parameters(config_path)
+    image_augmentation = _prompt_bool(
+        "Use ColorJitter image augmentation (can slow training)", default=False
+    )
     runs = _planned_ptp_runs(task)
     if with_evaluation:
         n_test = _prompt_int("Evaluation test episodes", default=200, minimum=1)
@@ -832,6 +845,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
             learning_rate,
             lr_scheduler,
             lr_warmup_steps,
+            image_augmentation,
         )
         if with_evaluation:
             evaluate = _evaluation_command(

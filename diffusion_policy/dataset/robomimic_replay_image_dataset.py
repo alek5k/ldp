@@ -52,6 +52,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             subsampling_method="uniform",
             use_cache=False,
             cache_images_in_memory=False,
+            image_augmentation=True,
             seed=42,
             val_ratio=0.0,
             return_temporal_history=False,
@@ -66,9 +67,16 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         self.use_embed_if_present = use_embed_if_present
         self.subsample_frames = subsample_frames
         self.subsampling_method = subsampling_method
-        self.image_transforms = transform = T.Compose([
-            T.ColorJitter(brightness=0.2, contrast=[0.8,1.2], saturation=[0.8,1.2], hue=0.05),  # Adjust brightness, contrast, saturation, hue
-        ])
+        self.image_augmentation = bool(image_augmentation)
+        self.image_transforms = (
+            T.Compose([
+                T.ColorJitter(
+                    brightness=0.2, contrast=[0.8, 1.2],
+                    saturation=[0.8, 1.2], hue=0.05,
+                ),
+            ])
+            if self.image_augmentation else None
+        )
 
         rgb_keys = list()
         lowdim_keys = list()
@@ -339,8 +347,12 @@ class RobomimicReplayImageDataset(BaseImageDataset):
 
             # past_data = past_data[self.subsample_frames-1::self.subsample_frames]
             comb_data = past_data
-            obs_dict[key] = (self.image_transforms(torch.from_numpy(np.moveaxis(comb_data[T_slice],-1,1
-                )).type(torch.uint8)).type(torch.float32) / 255.).numpy()
+            image = torch.from_numpy(
+                np.moveaxis(comb_data[T_slice], -1, 1)
+            ).type(torch.uint8)
+            if self.image_transforms is not None:
+                image = self.image_transforms(image)
+            obs_dict[key] = (image.type(torch.float32) / 255.).numpy()
             # T,C,H,W
             del data[key]
         for key in lowdim_keys:
