@@ -35,7 +35,6 @@ dependencies:
   - imageio=2.22.0
   - imageio-ffmpeg=0.4.7
   - termcolor=2.0.1
-  - tensorboard=2.10.1
   - tensorboardx=2.5.1
   - psutil=5.9.2
   - click=8.0.4
@@ -52,8 +51,9 @@ dependencies:
   - pip:
     # 0.26.1 is the newest W&B release compatible with Python 3.9.
     - wandb==0.26.1
-    # TensorBoard 2.10's generated protobufs require the legacy 3.x runtime.
-    - protobuf==3.20.3
+    # Modern TensorBoard supports the protobuf required by current W&B.
+    - tensorboard==2.18.0
+    - protobuf==4.25.3
     # Diffusers 0.11 imports the legacy cached_download helper.
     # This historical pin is available from PyPI, not current Conda channels.
     - huggingface-hub==0.25.2
