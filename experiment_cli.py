@@ -465,7 +465,7 @@ def _config_path_default_epochs(config_path: Path) -> int:
 
 def _prompt_optimization_parameters(
     config_path: Path,
-) -> tuple[int, int | None, float, str | None, int | None]:
+) -> tuple[int, int | None, int, float, str | None, int | None]:
     """Prompt for batch and learning-rate settings defined by a task config."""
     config = OmegaConf.load(config_path)
     batch_size = _prompt_int(
@@ -474,6 +474,11 @@ def _prompt_optimization_parameters(
     val_batch_size = None
     if "val_dataloader" in config and "batch_size" in config.val_dataloader:
         val_batch_size = batch_size
+    dataloader_workers = _prompt_int(
+        "DataLoader workers",
+        default=int(config.dataloader.get("num_workers", 0)),
+        minimum=0,
+    )
     learning_rate = _prompt_float(
         "Learning rate", default=float(config.optimizer.learning_rate), minimum=0.0
     )
@@ -490,7 +495,8 @@ def _prompt_optimization_parameters(
             default=int(config.training.lr_warmup_steps),
             minimum=0,
         )
-    return batch_size, val_batch_size, learning_rate, lr_scheduler, lr_warmup_steps
+    return (batch_size, val_batch_size, dataloader_workers, learning_rate,
+            lr_scheduler, lr_warmup_steps)
 
 
 def _lte_rgb_keys(launcher_task: str) -> tuple[str, list[str]]:
@@ -534,6 +540,7 @@ def _training_command(
     temporal_rgb_keys: list[str] | None,
     batch_size: int,
     val_batch_size: int | None,
+    dataloader_workers: int,
     learning_rate: float,
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
@@ -548,6 +555,7 @@ def _training_command(
         "training.device=cuda:0",
         f"training.num_epochs={epochs}",
         f"dataloader.batch_size={batch_size}",
+        f"dataloader.num_workers={dataloader_workers}",
         f"optimizer.learning_rate={learning_rate:g}",
         "+task.dataset.image_augmentation="
         f"{str(image_augmentation).lower()}",
@@ -572,6 +580,7 @@ def _training_command(
     ]
     if val_batch_size is not None:
         command.append(f"val_dataloader.batch_size={val_batch_size}")
+        command.append(f"val_dataloader.num_workers={dataloader_workers}")
     if lr_scheduler is not None:
         command.append(f"training.lr_scheduler={lr_scheduler}")
     if lr_warmup_steps is not None:
@@ -589,6 +598,7 @@ def _ptp_training_command(
     epochs: int,
     batch_size: int,
     val_batch_size: int | None,
+    dataloader_workers: int,
     learning_rate: float,
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
@@ -610,6 +620,7 @@ def _ptp_training_command(
         "training.device=cuda:0",
         f"training.num_epochs={epochs}",
         f"dataloader.batch_size={batch_size}",
+        f"dataloader.num_workers={dataloader_workers}",
         f"optimizer.learning_rate={learning_rate:g}",
         "+task.dataset.image_augmentation="
         f"{str(image_augmentation).lower()}",
@@ -618,6 +629,7 @@ def _ptp_training_command(
     ]
     if val_batch_size is not None:
         command.append(f"val_dataloader.batch_size={val_batch_size}")
+        command.append(f"val_dataloader.num_workers={dataloader_workers}")
     if lr_scheduler is not None:
         command.append(f"training.lr_scheduler={lr_scheduler}")
     if lr_warmup_steps is not None:
@@ -678,6 +690,7 @@ def _start_training(with_evaluation: bool) -> None:
     (
         batch_size,
         val_batch_size,
+        dataloader_workers,
         learning_rate,
         lr_scheduler,
         lr_warmup_steps,
@@ -795,6 +808,7 @@ def _start_training(with_evaluation: bool) -> None:
             temporal_rgb_keys=temporal_rgb_keys,
             batch_size=batch_size,
             val_batch_size=val_batch_size,
+            dataloader_workers=dataloader_workers,
             learning_rate=learning_rate,
             lr_scheduler=lr_scheduler,
             lr_warmup_steps=lr_warmup_steps,
@@ -825,6 +839,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
     (
         batch_size,
         val_batch_size,
+        dataloader_workers,
         learning_rate,
         lr_scheduler,
         lr_warmup_steps,
@@ -855,6 +870,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
             epochs,
             batch_size,
             val_batch_size,
+            dataloader_workers,
             learning_rate,
             lr_scheduler,
             lr_warmup_steps,

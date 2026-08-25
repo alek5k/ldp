@@ -353,7 +353,11 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        threadpool_limits(1)
+        # Limiting transform-library threads matters for CPU ColorJitter, but
+        # reconfiguring it per sample is needless overhead when augmentation
+        # is disabled (notably for 2k physical batches).
+        if self.image_augmentation:
+            threadpool_limits(1)
         data = self.sampler.sample_sequence(idx)
         if self._image_cache is not None:
             data.update(self._cached_observation_images(idx))
