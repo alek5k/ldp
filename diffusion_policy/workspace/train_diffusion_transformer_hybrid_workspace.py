@@ -77,7 +77,8 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             for loader_cfg in (cfg.dataloader, cfg.val_dataloader):
                 loader_cfg.num_workers = 0
                 loader_cfg.persistent_workers = False
-                loader_cfg.pop("prefetch_factor", None)
+                if "prefetch_factor" in loader_cfg:
+                    del loader_cfg["prefetch_factor"]
             print("Raw image GPU cache: forcing DataLoader workers to 0.")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
