@@ -91,11 +91,13 @@ ANSI_COLORS = {
 ANSI_RESET = "\033[0m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 WANDB_RUNNING_PREFIX = f"{ANSI_COLORS['active']}* "
+# These are the concrete environment tags emitted by the LTE base config's
+# ``[name, task_name, exp_name]`` tags and by the PTP config ``logging.tags``.
 WANDB_ENVIRONMENT_TAGS = {
-    "square": frozenset(("square_image_abs",)),
-    "tool_hang": frozenset(("tool_hang_image_abs",)),
-    "transport": frozenset(("transport_image",)),
-    "lh-aloha": frozenset(("lh_aloha_image", "aloha_image")),
+    "square": frozenset(("square_image_abs", "square_image")),
+    "tool_hang": frozenset(("tool_hang_image_abs", "tool_hang_image", "tool_image")),
+    "transport": frozenset(("transport_image_abs", "transport_image")),
+    "lh-aloha": frozenset(("lh_aloha_image", "aloha_image", "aloha_embed_image")),
     "lh-square": frozenset(("lh_square_image", "square_long_image")),
     "waitatgoal": frozenset(("waitatgoal_image",)),
     "liftqa": frozenset(("liftqa_image",)),
@@ -513,11 +515,37 @@ def _config_path_default_epochs(config_path: Path) -> int:
     return int(match.group(1))
 
 
+def _load_experiment_config(config_path: Path):
+    """Load a config and the same-directory Hydra defaults it composes."""
+    raw_config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
+    if not isinstance(raw_config, dict):
+        raise ValueError(f"Expected a mapping in {config_path}.")
+    defaults = raw_config.pop("defaults", [])
+    composed = OmegaConf.create()
+    own_config = OmegaConf.create(raw_config)
+    own_merged = False
+    for default in defaults:
+        if default == "_self_":
+            composed = OmegaConf.merge(composed, own_config)
+            own_merged = True
+            continue
+        if not isinstance(default, str):
+            raise ValueError(
+                f"Unsupported Hydra default {default!r} in {config_path}; "
+                "use a standalone config for CLI prompts."
+            )
+        default_path = config_path.parent / f"{default}.yaml"
+        if not default_path.is_file():
+            raise ValueError(f"Missing default config {default_path}.")
+        composed = OmegaConf.merge(composed, _load_experiment_config(default_path))
+    return OmegaConf.merge(composed, own_config) if not own_merged else composed
+
+
 def _prompt_optimization_parameters(
     config_path: Path,
 ) -> tuple[int, int | None, int, float, str | None, int | None]:
     """Prompt for batch and learning-rate settings defined by a task config."""
-    config = OmegaConf.load(config_path)
+    config = _load_experiment_config(config_path)
     batch_size = _prompt_int(
         "Training batch size", default=int(config.dataloader.batch_size), minimum=1
     )
@@ -1385,6 +1413,73 @@ def _show_progress() -> None:
         for _, run, progress, disk, runtime, note, updated, _ in sorted(
             evaluation_entries, key=lambda entry: _run_sort_key(entry[1]))
     ], "Episode")
+    _print_wandb_progress({run_dir.name for run_dir in _training_run_directories()})
+
+
+def _show_quick_progress() -> None:
+    """Show one compact local train/evaluation summary, then remote W&B runs."""
+    evaluations_by_train: dict[Path, Path] = {}
+    for evaluation_dir, train_dir in _saved_evaluation_runs():
+        previous = evaluations_by_train.get(train_dir)
+        try:
+            is_newer = previous is None or evaluation_dir.stat().st_mtime > previous.stat().st_mtime
+        except OSError:
+            is_newer = previous is None
+        if is_newer:
+            evaluations_by_train[train_dir] = evaluation_dir
+
+    rows = []
+    for run_dir in sorted(_training_run_directories(), key=lambda path: _run_sort_key(path.name)):
+        log_path = run_dir / "logs.json.txt"
+        if log_path.is_file():
+            current = _latest_epoch(log_path) or 0
+            total = _training_epoch_limit(run_dir)
+            total_value = int(total) if total.isdigit() else 0
+            epoch = _progress_color(f"{current}/{total}", _progress_state(current, total_value, log_path))
+        else:
+            epoch = "-"
+        evaluation_dir = evaluations_by_train.get(run_dir)
+        if evaluation_dir is None:
+            success_rate = "-"
+        else:
+            # An ellipsis explicitly means an evaluation exists but has not
+            # yet yielded episode scores.
+            success_rate = _evaluation_success_rate_label(evaluation_dir) or "..."
+        rows.append((run_dir.name, epoch, _run_note_label(run_dir), success_rate))
+
+    print("\nQuick progress")
+    if not rows:
+        print("  none")
+    else:
+        run_width = max(len("Training run"), *(len(run) for run, _, _, _ in rows))
+        epoch_width = max(
+            len("Epoch"),
+            *(len(ANSI_ESCAPE_RE.sub("", epoch)) for _, epoch, _, _ in rows),
+        )
+        note_width = _note_column_width([note for _, _, note, _ in rows])
+        sr_width = max(len("SR%"), *(len(success_rate) for _, _, _, success_rate in rows))
+        divider = (
+            f"  {'-' * run_width}-|-{'-' * epoch_width}-|-"
+            f"{'-' * note_width}-|-{'-' * sr_width}"
+        )
+        print(
+            f"  {'Training run':<{run_width}} | {'Epoch':<{epoch_width}} | "
+            f"{'Note':<{note_width}} | {'SR%':>{sr_width}}"
+        )
+        print(divider)
+        previous_environment = None
+        for run, epoch, note, success_rate in rows:
+            environment = _run_sort_key(run)[0]
+            if previous_environment is not None and environment != previous_environment:
+                print(divider)
+            visible_epoch = len(ANSI_ESCAPE_RE.sub("", epoch))
+            print(
+                f"  {run:<{run_width}} | {epoch}{' ' * (epoch_width - visible_epoch)} | "
+                f"{_truncate_note(note, note_width):<{note_width}} | {success_rate:>{sr_width}}"
+            )
+            previous_environment = environment
+        print("  * Blue epoch = active training; ... = evaluation exists but has no score yet.")
+
     _print_wandb_progress({run_dir.name for run_dir in _training_run_directories()})
 
 
@@ -2510,6 +2605,7 @@ def main() -> None:
                 "eval",
                 "train+eval",
                 "progress",
+                "quick progress",
                 "add run note",
                 "check success rates",
                 "delete training run directories",
@@ -2536,6 +2632,8 @@ def main() -> None:
                 _start_training_flow(with_evaluation=True)
             elif action == "progress":
                 _show_progress()
+            elif action == "quick progress":
+                _show_quick_progress()
             elif action == "add run note":
                 _add_run_note()
             elif action == "check success rates":

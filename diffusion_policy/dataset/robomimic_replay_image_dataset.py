@@ -178,7 +178,14 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         train_mask = ~val_mask
 
         keys = list(replay_buffer.keys())
-        if self.use_embed_if_present and "embedding" in keys:
+        self.embeddings_available = bool(
+            self.use_embed_if_present and "embedding" in keys
+        )
+        if self.use_embed_if_present and not self.embeddings_available:
+            print(
+                "No cached embeddings found; using raw images with the observation encoder."
+            )
+        if self.embeddings_available:
             keys = ["embedding", "action"]
 
         sampler = SequenceSampler(
@@ -246,7 +253,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         keys = list(self.replay_buffer.keys())
-        if self.use_embed_if_present and "embedding" in keys:
+        if self.embeddings_available:
             keys = ["embedding", "action"]
         val_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer, 
@@ -370,7 +377,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         rgb_keys = self.rgb_keys
         lowdim_keys = self.lowdim_keys
 
-        if self.use_embed_if_present:
+        if self.embeddings_available:
             rgb_keys = []
             lowdim_keys = ["embedding"]
 
