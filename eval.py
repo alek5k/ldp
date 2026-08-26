@@ -35,6 +35,8 @@ def _next_available_output_dir(path: pathlib.Path) -> pathlib.Path:
 @click.command()
 @click.option('-c', '--checkpoint', required=True)
 @click.option('-o', '--output_dir', required=True)
+@click.option('--source-checkpoint', default=None,
+    help='Checkpoint path to record as evaluation provenance.')
 @click.option('-p', '--force_perturbs', default=None)
 @click.option('-d', '--device', default='cuda:0')
 @click.option('-n', '--num_samples', default=1)
@@ -54,7 +56,7 @@ def _next_available_output_dir(path: pathlib.Path) -> pathlib.Path:
     help='Override the number of predicted actions executed before replanning.')
 @click.option('--num_inference_steps', type=int, default=None,
     help='Override the diffusion denoising steps used by the loaded policy.')
-def main(checkpoint, output_dir, force_perturbs, device, num_samples,
+def main(checkpoint, output_dir, source_checkpoint, force_perturbs, device, num_samples,
          zarr_path, n_test, n_train, n_test_vis, test_start_seed, max_steps,
          n_action_steps, num_inference_steps):
     requested_output_dir = pathlib.Path(output_dir)
@@ -71,6 +73,16 @@ def main(checkpoint, output_dir, force_perturbs, device, num_samples,
             zarr_path = str(resolved_output_dir / "rollouts.zarr")
     output_dir = str(resolved_output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=False)
+    if source_checkpoint:
+        checkpoint_path = pathlib.Path(source_checkpoint)
+        source_metadata = {
+            'training_run_name': checkpoint_path.parents[1].name,
+            'checkpoint_file': checkpoint_path.name,
+            'checkpoint_path': str(checkpoint_path),
+        }
+        (resolved_output_dir / 'source_checkpoint.json').write_text(
+            json.dumps(source_metadata, indent=2, sort_keys=True) + '\n'
+        )
     
     if force_perturbs:
         perturb_cfg = OmegaConf.load(force_perturbs)

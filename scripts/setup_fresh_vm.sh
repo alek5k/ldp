@@ -14,8 +14,9 @@ GITHUB_TOKEN=""
 WANDB_API_KEY=""
 NTFY_AUTH_TOKEN=""
 
-TARGET_ENVIRONMENT="lh-aloha"         # square | transport | tool-hang | lh-aloha | lh-square | waitatgoal | liftqa
-TRAINING_METHOD="lte"                 # lte | ptp
+TARGET_ENVIRONMENT="square"           # square | transport | tool-hang | lh-aloha | lh-square | waitatgoal | liftqa
+TRAINING_METHOD="ptp"                 # lte | ptp
+RUN_SETUP=true                        # false: reuse the existing checkout, environment, and datasets.
 LTE_ARCHITECTURE="unet"               # transformer | unet
 LTE_IMAGE_COUNT=1                     # First N RGB cameras for the target environment.
 LTE_HISTORY_DECODER_SAMPLES=16
@@ -33,6 +34,12 @@ LTE_CACHE_REFRESH_EPOCHS=5
 TRAIN_GPU="0"
 TRAIN_EPOCHS=5
 TRAIN_BATCH_SIZE=64
+TRAIN_DATALOADER_WORKERS=8
+TRAIN_PIN_MEMORY=true
+TRAIN_PERSISTENT_WORKERS=true
+TRAIN_PREFETCH_FACTOR=1
+TRAIN_IMAGE_AUGMENTATION=false          # ColorJitter; can slow CPU-bound training.
+TRAIN_CACHE_IMAGES_ON_GPU=true          # Faster input pipeline; consumes GPU RAM.
 TRAIN_LEARNING_RATE="0.0001"
 TRAIN_SEED=42
 TRAIN_SEQUENTIAL_RUNS=1
@@ -221,7 +228,7 @@ run_training() {
         run_name="${TARGET_ENVIRONMENT//-/_}_${TRAINING_METHOD}_$(date +%Y%m%d_%H%M%S)"
         (( TRAIN_SEQUENTIAL_RUNS > 1 )) && run_name+="-r$((i+1))"
         output_dir="${output_root}/${run_name}"
-        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}")
+        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED+i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}" "+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
         if [[ "${TRAINING_METHOD}" == lte ]]; then
             [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
@@ -250,6 +257,7 @@ ulimit -l unlimited || true
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 MINIFORGE_ARCH="x86_64"
 
+if [[ "${RUN_SETUP}" == "true" ]]; then
 if [[ ! -x "${CONDA_DIR}/bin/conda" ]]; then
     log "Installing Miniforge in ${CONDA_DIR}"
     INSTALLER="$(mktemp --suffix=.sh miniforge-XXXXXX)"
@@ -314,6 +322,13 @@ fi
 
 download_selected_dataset
 download_observation_encoders
+else
+    log "Skipping setup; reusing ${REPO_DIR}, ${CONDA_ENV_NAME}, and existing data"
+fi
+
+source "${CONDA_DIR}/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV_NAME}"
+cd "${REPO_DIR}"
 
 log "Logging into Weights & Biases"
 export WANDB_API_KEY WANDB_ENTITY

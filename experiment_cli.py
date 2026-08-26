@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 TRAIN_SCRIPT = REPO_ROOT / "train_lte_img_not.sh"
 TRAIN_PY = REPO_ROOT / "train.py"
 EVAL_SCRIPT = REPO_ROOT / "eval.py"
+EVAL_SOURCE_METADATA_FILENAME = "source_checkpoint.json"
 TASKS = (
     "square",
     "tool_hang",
@@ -72,6 +73,9 @@ LAUNCHER_EPOCH_CONFIGS = {
     "liftqa": "liftqa/lte_img_not.yaml",
 }
 PTP_TASK_CONFIGS = {
+    "square": REPO_ROOT / "experiment_configs" / "square" / "transformer_square.yaml",
+    "tool-hang": REPO_ROOT / "experiment_configs" / "tool" / "transformer_tool_hang.yaml",
+    "transport": REPO_ROOT / "experiment_configs" / "transport" / "transformer_transport.yaml",
     "lh-aloha": REPO_ROOT / "experiment_configs" / "aloha" / "transformer_aloha.yaml",
     "lh-square": REPO_ROOT / "experiment_configs" / "longhist" / "transformer_longhist.yaml",
 }
@@ -86,6 +90,16 @@ ANSI_COLORS = {
 }
 ANSI_RESET = "\033[0m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+WANDB_RUNNING_PREFIX = f"{ANSI_COLORS['active']}* "
+WANDB_ENVIRONMENT_TAGS = {
+    "square": frozenset(("square_image_abs",)),
+    "tool_hang": frozenset(("tool_hang_image_abs",)),
+    "transport": frozenset(("transport_image",)),
+    "lh-aloha": frozenset(("lh_aloha_image", "aloha_image")),
+    "lh-square": frozenset(("lh_square_image", "square_long_image")),
+    "waitatgoal": frozenset(("waitatgoal_image",)),
+    "liftqa": frozenset(("liftqa_image",)),
+}
 
 
 def _prompt_menu(prompt: str, choices: list[str]) -> str:
@@ -93,6 +107,25 @@ def _prompt_menu(prompt: str, choices: list[str]) -> str:
         print()
         for index, choice in enumerate(choices, start=1):
             print(f"  {index}. {choice}")
+        answer = input(prompt).strip()
+        try:
+            return choices[int(answer) - 1]
+        except (ValueError, IndexError):
+            print(f"Enter a number from 1 to {len(choices)}.")
+
+
+def _prompt_grouped_menu(
+    prompt: str, choices: list[str], groups: list[str],
+) -> str:
+    """Select a numbered item while visually separating environment groups."""
+    while True:
+        print()
+        previous_group = None
+        for index, (choice, group) in enumerate(zip(choices, groups), start=1):
+            if previous_group is not None and group != previous_group:
+                print(f"  {'-' * 72}")
+            print(f"  {index}. {choice}")
+            previous_group = group
         answer = input(prompt).strip()
         try:
             return choices[int(answer) - 1]
@@ -650,6 +683,7 @@ def _evaluation_command(
         sys.executable,
         str(EVAL_SCRIPT),
         "--checkpoint", str(checkpoint),
+        "--source-checkpoint", str(checkpoint),
         "--output_dir", str(output_dir),
         "--device", "cuda:0",
         "--n_test", str(n_test),
@@ -878,8 +912,9 @@ def _start_ptp_training(with_evaluation: bool) -> None:
             cache_images_on_gpu,
         )
         if with_evaluation:
+            checkpoint = output_dir / "checkpoints" / "latest.ckpt"
             evaluate = _evaluation_command(
-                output_dir / "checkpoints" / "latest.ckpt",
+                checkpoint,
                 inference_dir,
                 test_start_seed,
                 gpu,
@@ -910,7 +945,7 @@ def _available_evaluation_runs() -> list[Path]:
             for run_dir in _training_run_directories()
             if any((run_dir / "checkpoints").glob("*.ckpt"))
         ),
-        key=lambda path: str(path),
+        key=lambda path: _run_sort_key(path.name),
     )
 
 
@@ -918,8 +953,9 @@ def _prompt_evaluation_run() -> Path:
     runs = _available_evaluation_runs()
     if not runs:
         raise RuntimeError("No training runs with checkpoints found in either output root.")
-    labels = [str(run.relative_to(REPO_ROOT)) for run in runs]
-    selected = _prompt_menu("Select training run: ", labels)
+    labels = [f"{run.name} ({run.parent.name})" for run in runs]
+    groups = [_run_sort_key(run.name)[0] for run in runs]
+    selected = _prompt_grouped_menu("Select training run: ", labels, groups)
     return runs[labels.index(selected)]
 
 
@@ -935,10 +971,10 @@ def _prompt_checkpoint(run_dir: Path) -> Path:
 
 
 def _evaluation_output_run_name(checkpoint: Path) -> str:
-    """Keep timestamped run names, or assign one when evaluating a legacy run."""
+    """Keep the selected training run name for independently launched evals."""
     checkpoint_run_name = checkpoint.parents[1].name
     if re.fullmatch(
-        r".+_(?:lte_(?:transformer|unet)|ptp)_\d{8}_\d{6}(?:-r\d+)?",
+        r".+_(?:lte_(?:transformer|unet)|ptp)(?:_.+)?",
         checkpoint_run_name,
     ):
         return checkpoint_run_name
@@ -993,6 +1029,25 @@ def _training_epoch_limit(run_dir: Path) -> str:
         config_path.read_text(encoding="utf-8", errors="replace"),
     )
     return match.group(1) if match else "?"
+
+
+def _evaluation_checkpoint_file(evaluation_dir: Path) -> str | None:
+    """Return the checkpoint filename recorded when this evaluation was launched."""
+    metadata_path = evaluation_dir / EVAL_SOURCE_METADATA_FILENAME
+    if not metadata_path.is_file():
+        return None
+    try:
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    checkpoint_file = value.get("checkpoint_file")
+    return checkpoint_file if isinstance(checkpoint_file, str) else None
+
+
+def _checkpoint_epoch(checkpoint_file: str) -> str | None:
+    """Extract an epoch from checkpoint filenames such as ``epoch_50.pth``."""
+    match = re.search(r"(?:^|[_=-])epoch[_=-]?(\d+)(?:[_=-]|\.|$)", checkpoint_file)
+    return match.group(1) if match else None
 
 
 def _latest_epoch(metrics_path: Path) -> int | None:
@@ -1118,6 +1173,21 @@ def _run_note_label(run_dir: Path) -> str:
     return note[0].strip()
 
 
+def _evaluation_note_label(evaluation_dir: Path) -> str:
+    """Prefer an eval-specific note, otherwise inherit its training-run note."""
+    note = _run_note_label(evaluation_dir)
+    if note:
+        return note
+    source_name = _eval_run_source_name(evaluation_dir)
+    if source_name is None:
+        return ""
+    source_run = next(
+        (run for run in _training_run_directories() if run.name == source_name),
+        None,
+    )
+    return _run_note_label(source_run) if source_run is not None else ""
+
+
 def _note_column_width(notes: list[str]) -> int:
     """Fit the shared note column to its content, with a sensible hard cap."""
     return min(RUN_NOTE_MAX_LENGTH, max(len("Note"), *(len(note) for note in notes)))
@@ -1131,13 +1201,13 @@ def _truncate_note(note: str, width: int) -> str:
 
 def _run_sort_key(run_name: str) -> tuple[str, str, str]:
     """Sort runs by environment, then their timestamped directory suffix."""
-    normalized_name = run_name.lower()
+    normalized_name = ANSI_ESCAPE_RE.sub("", run_name).removeprefix("* ").lower()
     matching_tasks = [
         task for task in TASKS
         if normalized_name.startswith(task.replace("-", "_"))
     ]
     environment = max(matching_tasks, key=len) if matching_tasks else normalized_name
-    timestamp_match = re.search(r"_(\d{8}_\d{6})(?:-r\d+)?$", run_name)
+    timestamp_match = re.search(r"_(\d{8}_\d{6})(?:-r\d+)?$", normalized_name)
     # Legacy names without a timestamp sort after timestamped runs of the same
     # environment, while retaining a stable name-based tie-breaker.
     timestamp = timestamp_match.group(1) if timestamp_match else "99999999_999999"
@@ -1161,12 +1231,12 @@ def _print_progress_table(
     print(
         f"  {'Run':<{run_width}} | {progress_label:<{progress_width}} | "
         f"{'Disk':<{disk_width}} | {'Runtime':<{runtime_width}} | "
-        f"{'Note':<{note_width}} | Updated"
+        f"{'Note':<{note_width}} | SR%"
     )
     print(
         f"  {'-' * run_width}-|-{'-' * progress_width}-|-{'-' * disk_width}-|-"
         f"{'-' * runtime_width}-|-"
-        f"{'-' * note_width}-|--------"
+        f"{'-' * note_width}-|-----"
     )
     previous_environment = None
     for run, progress, disk, runtime, note, updated in rows:
@@ -1175,7 +1245,7 @@ def _print_progress_table(
             print(
                 f"  {'-' * run_width}-|-{'-' * progress_width}-|-{'-' * disk_width}-|-"
                 f"{'-' * runtime_width}-|-"
-                f"{'-' * note_width}-|--------"
+                f"{'-' * note_width}-|-----"
             )
         visible_progress = len(ANSI_ESCAPE_RE.sub("", progress))
         print(
@@ -1189,7 +1259,10 @@ def _print_training_progress_table(rows: list[tuple[str, str, str, str, str, str
     if not rows:
         print("  none")
         return
-    run_width = max(len("Run"), *(len(run) for run, _, _, _, _, _ in rows))
+    run_width = max(
+        len("Run"),
+        *(len(ANSI_ESCAPE_RE.sub("", run)) for run, _, _, _, _, _ in rows),
+    )
     epoch_width = max(
         len("Epoch"),
         *(len(ANSI_ESCAPE_RE.sub("", epoch)) for _, epoch, _, _, _, _ in rows),
@@ -1217,8 +1290,10 @@ def _print_training_progress_table(rows: list[tuple[str, str, str, str, str, str
                 f"{'-' * note_width}-|--------"
             )
         visible_epoch = len(ANSI_ESCAPE_RE.sub("", epoch))
+        visible_run = len(ANSI_ESCAPE_RE.sub("", run))
         print(
-            f"  {run:<{run_width}} | {epoch}{' ' * (epoch_width - visible_epoch)} | "
+            f"  {run}{' ' * (run_width - visible_run)} | "
+            f"{epoch}{' ' * (epoch_width - visible_epoch)} | "
             f"{disk:<{disk_width}} | {runtime:<{runtime_width}} | "
             f"{_truncate_note(note, note_width):<{note_width}} | {updated}"
         )
@@ -1227,6 +1302,7 @@ def _print_training_progress_table(rows: list[tuple[str, str, str, str, str, str
 
 def _show_progress() -> None:
     """Print compact, user-facing train and evaluation progress."""
+    inference_root = REPO_ROOT / "data" / "inference"
     train_logs = sorted(
         (
             run_dir / "logs.json.txt"
@@ -1260,7 +1336,6 @@ def _show_progress() -> None:
             training_entries, key=lambda entry: _run_sort_key(entry[1]))
     ])
 
-    inference_root = REPO_ROOT / "data" / "inference"
     evaluation_entries = []
     if inference_root.is_dir():
         for dataset_dir in inference_root.iterdir():
@@ -1273,8 +1348,8 @@ def _show_progress() -> None:
                 _progress_color(progress, state),
                 _disk_usage_label(dataset_dir),
                 _evaluation_runtime_label(dataset_dir, source),
-                _run_note_label(dataset_dir),
-                _age_label(source),
+                _evaluation_note_label(dataset_dir),
+                _evaluation_success_rate_label(dataset_dir) or "-",
                 source,
             ))
     print("\nEvaluations")
@@ -1283,6 +1358,7 @@ def _show_progress() -> None:
         for _, run, progress, disk, runtime, note, updated, _ in sorted(
             evaluation_entries, key=lambda entry: _run_sort_key(entry[1]))
     ], "Episode")
+    _print_wandb_progress({run_dir.name for run_dir in _training_run_directories()})
 
 
 def _add_run_note() -> None:
@@ -1290,11 +1366,14 @@ def _add_run_note() -> None:
     run_type = _prompt_menu("Add note to: ", ["training run", "inference run", "back"])
     if run_type == "back":
         return
-    root = REPO_ROOT / "data" / ("outputs" if run_type == "training run" else "inference")
-    candidates = sorted(
-        (path for path in root.iterdir() if path.is_dir() and not path.is_symlink()),
-        key=lambda path: path.name,
-    ) if root.is_dir() else []
+    if run_type == "training run":
+        candidates = _training_run_directories()
+    else:
+        root = REPO_ROOT / "data" / "inference"
+        candidates = sorted(
+            (path for path in root.iterdir() if path.is_dir() and not path.is_symlink()),
+            key=lambda path: path.name,
+        ) if root.is_dir() else []
     if not candidates:
         print(f"No {run_type}s found.")
         return
@@ -1356,6 +1435,19 @@ def _evaluation_episode_scores(eval_dir: Path) -> list[float]:
     return scores
 
 
+def _evaluation_success_rate_label(eval_dir: Path) -> str:
+    """Return a compact success rate when a completed evaluation has scores."""
+    task = _evaluation_task(eval_dir)
+    if task is None:
+        return ""
+    try:
+        scores = _evaluation_episode_scores(eval_dir)
+    except RuntimeError:
+        return ""
+    successes = sum(score >= SUCCESS_REWARD_THRESHOLDS[task] - 1e-8 for score in scores)
+    return f"{successes / len(scores):.1%}"
+
+
 def _recover_scores_from_launcher_log(eval_dir: Path) -> list[float] | None:
     """Recover a legacy truncated result file from its matching launcher log.
 
@@ -1415,6 +1507,16 @@ def _check_success_rates() -> None:
     if not inference_root.is_dir():
         print("No inference directory exists.")
         return
+    training_runs = {run.name: run for run in _training_run_directories()}
+
+    def evaluation_epochs(evaluation_dir: Path) -> str:
+        checkpoint_file = _evaluation_checkpoint_file(evaluation_dir)
+        if checkpoint_file and Path(checkpoint_file).stem not in {"final", "latest"}:
+            return _checkpoint_epoch(checkpoint_file) or "?"
+        source_name = _eval_run_source_name(evaluation_dir)
+        source_run = training_runs.get(source_name) if source_name else None
+        return _training_epoch_limit(source_run) if source_run is not None else "?"
+
     rows = []
     for task in TASKS:
         evaluation_dirs = [
@@ -1428,7 +1530,7 @@ def _check_success_rates() -> None:
             except RuntimeError:
                 rows.append((
                     task, evaluation_dir.name, "skipped", "", "", "",
-                    _run_note_label(evaluation_dir),
+                    _evaluation_note_label(evaluation_dir),
                 ))
                 continue
             successes = sum(score >= threshold - 1e-8 for score in scores)
@@ -1437,9 +1539,9 @@ def _check_success_rates() -> None:
                 evaluation_dir.name,
                 f"{successes}/{len(scores)}",
                 f"{successes / len(scores):.1%}",
-                f"{threshold:g}",
+                evaluation_epochs(evaluation_dir),
                 f"{sum(scores) / len(scores):.2f}",
-                _run_note_label(evaluation_dir),
+                _evaluation_note_label(evaluation_dir),
             ))
     if not rows:
         print("No evaluation directories found.")
@@ -1450,28 +1552,28 @@ def _check_success_rates() -> None:
     run_width = max(len("Run"), *(len(row[1]) for row in rows))
     result_width = max(len("Successful"), *(len(row[2]) for row in rows))
     rate_width = max(len("Rate"), *(len(row[3]) for row in rows))
-    threshold_width = max(len("Thresh."), *(len(row[4]) for row in rows))
+    epoch_width = max(len("Ep."), *(len(row[4]) for row in rows))
     mean_width = max(len("Mean sc."), *(len(row[5]) for row in rows))
     note_width = _note_column_width([row[6] for row in rows])
     print(
         f"  {'Run':<{run_width}} | {'Successful':>{result_width}} | "
-        f"{'Rate':>{rate_width}} | {'Thresh.':>{threshold_width}} | "
+        f"{'Rate':>{rate_width}} | {'Ep.':>{epoch_width}} | "
         f"{'Mean sc.':>{mean_width}} | {'Note':<{note_width}}"
     )
     print(
         f"  {'-' * run_width}-|-{'-' * result_width}-|-{'-' * rate_width}-|-"
-        f"{'-' * threshold_width}-|-{'-' * mean_width}-|-{'-' * note_width}"
+        f"{'-' * epoch_width}-|-{'-' * mean_width}-|-{'-' * note_width}"
     )
     previous_environment = None
-    for environment, run, successful, rate, threshold_label, mean_score, note in rows:
+    for environment, run, successful, rate, epochs, mean_score, note in rows:
         if previous_environment is not None and environment != previous_environment:
             print(
                 f"  {'-' * run_width}-|-{'-' * result_width}-|-{'-' * rate_width}-|-"
-                f"{'-' * threshold_width}-|-{'-' * mean_width}-|-{'-' * note_width}"
+                f"{'-' * epoch_width}-|-{'-' * mean_width}-|-{'-' * note_width}"
             )
         print(
             f"  {run:<{run_width}} | {successful:>{result_width}} | "
-            f"{rate:>{rate_width}} | {threshold_label:>{threshold_width}} | "
+            f"{rate:>{rate_width}} | {epochs:>{epoch_width}} | "
             f"{mean_score:>{mean_width}} | {_truncate_note(note, note_width):<{note_width}}"
         )
         previous_environment = environment
@@ -1719,6 +1821,175 @@ def _show_gpu_memory_by_process() -> None:
         print(f"  {memory_mib:>6} MiB | PID {pid:<7} | {command}")
 
 
+def _wandb_environment_from_tags(tags: object) -> str | None:
+    """Map a W&B run's verified task tag to an LDP environment."""
+    tag_set = {str(tag) for tag in tags or ()}
+    matches = [
+        environment for environment, environment_tags in WANDB_ENVIRONMENT_TAGS.items()
+        if tag_set & environment_tags
+    ]
+    return max(matches, key=len) if matches else None
+
+
+def _wandb_run_folder_artifact_names(run: object) -> list[str]:
+    """Return output folder names recorded by W&B run-folder artifacts."""
+    names = []
+    try:
+        for artifact in run.logged_artifacts():
+            if artifact.type == "run-folder":
+                output_name = artifact.metadata.get("output_dir_name", artifact.name)
+                names.append(str(output_name).split(":", 1)[0])
+    except Exception:
+        pass
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _wandb_output_folder_candidates(run: object) -> list[str]:
+    """Collect stable output-folder identifiers, strongest first."""
+    candidates = _wandb_run_folder_artifact_names(run)
+    try:
+        config = run.config
+        if hasattr(config, "get"):
+            for key in ("output_dir", "hydra.run.dir"):
+                output_dir = config.get(key)
+                if output_dir:
+                    candidates.append(Path(str(output_dir)).name)
+        logging = config.get("logging", {}) if hasattr(config, "get") else {}
+        logging_name = logging.get("name") if hasattr(logging, "get") else None
+        if logging_name:
+            candidates.append(str(logging_name))
+        if hasattr(config, "get") and config.get("logging.name"):
+            candidates.append(str(config["logging.name"]))
+    except Exception:
+        pass
+    if getattr(run, "name", None):
+        candidates.append(str(run.name))
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _wandb_runs_for_progress() -> list[tuple[str, str, str]]:
+    """Return tagged W&B runs that are active or have a run-folder artifact.
+
+    Artifact metadata is preferred as the output-folder name. A currently
+    running run without an artifact falls back to its logged output directory.
+    """
+    try:
+        import wandb
+
+        api = wandb.Api(timeout=20)
+        entity = api.default_entity
+        project = os.environ.get("WANDB_PROJECT", "ldp_temporal_diffusion_policy")
+        runs = api.runs(f"{entity}/{project}", per_page=100)
+    except Exception:
+        return []
+
+    records: dict[str, tuple[str, str]] = {}
+    for run in runs:
+        if _wandb_environment_from_tags(getattr(run, "tags", ())) is None:
+            continue
+        state = str(getattr(run, "state", ""))
+        artifact_names = _wandb_run_folder_artifact_names(run)
+        if state != "running" and not artifact_names:
+            continue
+        candidates = artifact_names or _wandb_output_folder_candidates(run)
+        if not candidates:
+            continue
+        folder_name = candidates[0]
+        previous = records.get(folder_name)
+        if previous is None or (state == "running" and previous[0] != "running"):
+            records[folder_name] = (state, str(run.name))
+    return [
+        (folder_name, state, run_name)
+        for folder_name, (state, run_name) in records.items()
+    ]
+
+
+def _print_wandb_progress(local_training_names: set[str]) -> None:
+    """Show remote W&B state after local progress has already been printed."""
+    rows = [
+        (folder_name, state, run_name, folder_name in local_training_names)
+        for folder_name, state, run_name in _wandb_runs_for_progress()
+        if state == "running" or folder_name not in local_training_names
+    ]
+    print("\nW&B")
+    if not rows:
+        print("  no running or unsynced artifact-backed runs")
+        return
+    rows.sort(key=lambda row: _run_sort_key(row[0]))
+    folder_width = max(len("Expected folder"), *(len(row[0]) + 2 for row in rows))
+    state_width = max(len("State"), *(len(row[1]) for row in rows))
+    location_width = len("Local")
+    run_width = max(len("W&B run"), *(len(row[2]) for row in rows))
+    print(
+        f"  {'Expected folder':<{folder_width}} | {'State':<{state_width}} | "
+        f"{'Local':<{location_width}} | {'W&B run':<{run_width}}"
+    )
+    print(
+        f"  {'-' * folder_width}-|-{'-' * state_width}-|-"
+        f"{'-' * location_width}-|-{'-' * run_width}"
+    )
+    for folder_name, state, run_name, is_local in rows:
+        folder_label = f"{WANDB_RUNNING_PREFIX}{folder_name}{ANSI_RESET}"
+        print(
+            f"  {folder_label}{' ' * (folder_width - len(folder_name) - 2)} | "
+            f"{state:<{state_width}} | {'yes' if is_local else 'no':<{location_width}} | "
+            f"{run_name:<{run_width}}"
+        )
+    print("  * Blue rows are W&B runs; finished rows without a local folder are artifact-backed only.")
+
+
+def _show_finished_wandb_runs_missing_locally() -> None:
+    """List finished, task-tagged W&B runs whose output is not on either disk."""
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb is required; run the experiment CLI in the LDP Conda environment."
+        ) from exc
+
+    api = wandb.Api(timeout=20)
+    entity = api.default_entity
+    project = _prompt_text("W&B project", "ldp_temporal_diffusion_policy")
+    try:
+        runs = api.runs(f"{entity}/{project}", filters={"state": "finished"})
+    except Exception as exc:
+        raise RuntimeError(f"Could not list W&B runs in {entity}/{project}: {exc}") from exc
+
+    local_names = {run_dir.name for run_dir in _training_run_directories()}
+    missing = []
+    for run in runs:
+        if getattr(run, "state", None) != "finished":
+            continue
+        environment = _wandb_environment_from_tags(getattr(run, "tags", ()))
+        if environment is None:
+            continue
+        candidates = _wandb_output_folder_candidates(run)
+        if any(candidate in local_names for candidate in candidates):
+            continue
+        expected_folder = candidates[0] if candidates else "?"
+        missing.append((environment, str(run.name), str(run.id), expected_folder))
+
+    if not missing:
+        print("All finished, task-tagged W&B runs have a matching local output folder.")
+        return
+    missing.sort(key=lambda row: (_run_sort_key(row[0])[0], row[1]))
+    env_width = max(len("Env"), *(len(row[0]) for row in missing))
+    run_width = max(len("W&B run"), *(len(row[1]) for row in missing))
+    id_width = max(len("ID"), *(len(row[2]) for row in missing))
+    folder_width = max(len("Expected folder"), *(len(row[3]) for row in missing))
+    print("\nFinished W&B runs missing locally")
+    print(
+        f"  {'Env':<{env_width}} | {'W&B run':<{run_width}} | "
+        f"{'ID':<{id_width}} | {'Expected folder':<{folder_width}}"
+    )
+    print(f"  {'-' * env_width}-|-{'-' * run_width}-|-{'-' * id_width}-|-{'-' * folder_width}")
+    for environment, run_name, run_id, expected_folder in missing:
+        print(
+            f"  {environment:<{env_width}} | {run_name:<{run_width}} | "
+            f"{run_id:<{id_width}} | {expected_folder:<{folder_width}}"
+        )
+
+
 def _wandb_run_folder_artifacts() -> tuple[object, list[tuple[object, object]]]:
     """Select W&B runs that have a completed, downloadable run-folder artifact."""
     try:
@@ -1864,6 +2135,15 @@ def _saved_training_runs() -> list[Path]:
 
 def _eval_run_source_name(eval_dir: Path) -> str | None:
     """Infer the train-output name used by this CLI's evaluation naming."""
+    metadata_path = eval_dir / EVAL_SOURCE_METADATA_FILENAME
+    if metadata_path.is_file():
+        try:
+            value = json.loads(metadata_path.read_text(encoding="utf-8"))
+            source_name = value.get("training_run_name")
+            if isinstance(source_name, str) and source_name:
+                return source_name
+        except (OSError, json.JSONDecodeError):
+            pass
     match = re.fullmatch(
         r"(.+_(?:lte_(?:transformer|unet)|ptp)_\d{8}_\d{6})(?:-r\d+)?",
         eval_dir.name,
@@ -1905,11 +2185,18 @@ def _saved_evaluation_runs() -> list[tuple[Path, Path]]:
     return resolved_runs
 
 
-def _select_two_run_indices(prompt: str, labels: list[str]) -> tuple[int, int]:
+def _select_two_run_indices(
+    prompt: str, labels: list[str], groups: list[str] | None = None,
+) -> tuple[int, int]:
     """Prompt once for two distinct comma-separated run numbers."""
     print()
+    previous_group = None
     for index, label in enumerate(labels, start=1):
+        group = groups[index - 1] if groups is not None else None
+        if previous_group is not None and group != previous_group:
+            print(f"  {'-' * 72}")
         print(f"  {index}. {label}")
+        previous_group = group
     while True:
         answer = input(f"Select two {prompt}s (for example 1,2): ").strip()
         parts = [part.strip() for part in answer.split(",")]
@@ -2043,22 +2330,30 @@ def _compare_run_configs() -> None:
     if run_kind == "back":
         return
     if run_kind == "training runs":
-        runs = _saved_training_runs()
+        runs = sorted(_saved_training_runs(), key=lambda run: _run_sort_key(run.name))
         if len(runs) < 2:
             print("Need at least two saved training runs with saved configs.")
             return
         first_index, second_index = _select_two_run_indices(
-            "training run", [run.name for run in runs]
+            "training run",
+            [run.name for run in runs],
+            [_run_sort_key(run.name)[0] for run in runs],
         )
         _print_config_diff(runs[first_index], runs[second_index])
         return
 
-    evaluations = _saved_evaluation_runs()
+    evaluations = sorted(
+        _saved_evaluation_runs(), key=lambda pair: _run_sort_key(pair[1].name)
+    )
     if len(evaluations) < 2:
         print("Need at least two evaluation runs with resolvable training configs.")
         return
     labels = [f"{eval_dir.name}  <-  {train_run.name}" for eval_dir, train_run in evaluations]
-    first_index, second_index = _select_two_run_indices("evaluation run", labels)
+    first_index, second_index = _select_two_run_indices(
+        "evaluation run",
+        labels,
+        [_run_sort_key(train_run.name)[0] for _, train_run in evaluations],
+    )
     _print_config_diff(evaluations[first_index][1], evaluations[second_index][1])
 
 
@@ -2079,6 +2374,7 @@ def main() -> None:
                 "delete inference directories",
                 "compress inference images to videos",
                 "restore W&B run folder to external outputs",
+                "find finished W&B runs missing locally",
                 "show disk usage",
                 "show GPU status (nvidia-smi)",
                 "show GPU memory by process",
@@ -2109,6 +2405,8 @@ def main() -> None:
                 _compress_inference_images_to_videos()
             elif action == "restore W&B run folder to external outputs":
                 _restore_wandb_run_folder()
+            elif action == "find finished W&B runs missing locally":
+                _show_finished_wandb_runs_missing_locally()
             elif action == "show disk usage":
                 _show_disk_usage()
             elif action == "show GPU status (nvidia-smi)":
