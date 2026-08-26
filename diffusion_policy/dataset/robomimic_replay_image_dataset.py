@@ -168,7 +168,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             # only take first k obs from images
             for key in rgb_keys + lowdim_keys:
                 key_first_k[key] = n_obs_steps*subsample_frames
-            key_first_k["embedding"] = n_obs_steps*subsample_frames
+            if "embedding" in replay_buffer:
+                key_first_k["embedding"] = n_obs_steps*subsample_frames
             
 
         val_mask = get_val_mask(
