@@ -23,6 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 TRAIN_SCRIPT = REPO_ROOT / "train_lte_img_not.sh"
 TRAIN_PY = REPO_ROOT / "train.py"
 EVAL_SCRIPT = REPO_ROOT / "eval.py"
+REWRITE_EMBEDDINGS_SCRIPT = REPO_ROOT / "rewrite_with_embeddings.py"
+DOWNLOAD_OBS_ENCODERS_SCRIPT = REPO_ROOT / "scripts" / "download_obs_encoders.sh"
 EVAL_SOURCE_METADATA_FILENAME = "source_checkpoint.json"
 TASKS = (
     "square",
@@ -681,7 +683,6 @@ def _ptp_training_command(
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
     image_augmentation: bool,
-    cache_images_on_gpu: bool,
 ) -> str:
     """Build a PTP transformer launch using its direct Hydra config."""
     command = [
@@ -702,8 +703,9 @@ def _ptp_training_command(
         f"optimizer.learning_rate={learning_rate:g}",
         "+task.dataset.image_augmentation="
         f"{str(image_augmentation).lower()}",
-        "+task.dataset.cache_images_on_gpu="
-        f"{str(cache_images_on_gpu).lower()}",
+        # PTP consumes the precomputed embeddings. Retaining raw images on the
+        # GPU would only waste memory and prevents multi-worker loading.
+        "+task.dataset.cache_images_on_gpu=false",
     ]
     if val_batch_size is not None:
         command.append(f"val_dataloader.batch_size={val_batch_size}")
@@ -713,6 +715,40 @@ def _ptp_training_command(
     if lr_warmup_steps is not None:
         command.append(f"training.lr_warmup_steps={lr_warmup_steps}")
     return f"{_environment_prefix(gpu)} {shlex.join(command)}"
+
+
+def _ptp_embedding_cache_command(task: str, config_path: Path, gpu: str) -> str | None:
+    """Build the README embedding-cache preparation command for Robomimic PTP."""
+    if task not in {"square", "tool-hang", "transport"}:
+        return None
+    config = _load_experiment_config(config_path)
+    checkpoint = Path(str(config.obs_encoder_dir))
+    dataset_path = Path(str(config.task.dataset.dataset_path))
+    if not checkpoint.is_absolute():
+        checkpoint = REPO_ROOT / checkpoint
+    if not dataset_path.is_absolute():
+        dataset_path = REPO_ROOT / dataset_path
+    cache_log_dir = REPO_ROOT / "data" / "embedding_cache_logs" / task
+    command = [
+        sys.executable,
+        str(REWRITE_EMBEDDINGS_SCRIPT),
+        "-c", str(checkpoint),
+        "-o", str(cache_log_dir),
+        "-f", str(dataset_path),
+        "-d", "cuda:0",
+    ]
+    return f"{_environment_prefix(gpu)} {shlex.join(command)}"
+
+
+def _ptp_encoder_download_command(task: str, config_path: Path) -> str | None:
+    """Download the README encoder bundle only when this task's encoder is absent."""
+    config = _load_experiment_config(config_path)
+    checkpoint = Path(str(config.obs_encoder_dir))
+    if not checkpoint.is_absolute():
+        checkpoint = REPO_ROOT / checkpoint
+    if checkpoint.is_file():
+        return None
+    return shlex.join(["bash", str(DOWNLOAD_OBS_ENCODERS_SCRIPT), checkpoint.name])
 
 
 def _evaluation_command(
@@ -928,9 +964,6 @@ def _start_ptp_training(with_evaluation: bool) -> None:
     image_augmentation = _prompt_bool(
         "Use ColorJitter image augmentation (can slow training)", default=False
     )
-    cache_images_on_gpu = _prompt_bool(
-        "Cache raw images on GPU (faster input, uses GPU RAM)", default=False
-    )
     runs = _planned_ptp_runs(task)
     run_note = _prompt_run_note()
     if with_evaluation:
@@ -943,6 +976,14 @@ def _start_ptp_training(with_evaluation: bool) -> None:
         test_start_seed = 0
 
     commands = []
+    encoder_download = _ptp_encoder_download_command(task, config_path)
+    if encoder_download is not None:
+        print("PTP will download the missing observation-encoder bundle before training.")
+        commands.append(encoder_download)
+    embedding_cache = _ptp_embedding_cache_command(task, config_path, gpu)
+    if embedding_cache is not None:
+        print("PTP will rebuild the Robomimic image-embedding field before training.")
+        commands.append(embedding_cache)
     for seed, output_dir, inference_dir in runs:
         _write_initial_run_note(output_dir, run_note)
         train = _ptp_training_command(
@@ -958,7 +999,6 @@ def _start_ptp_training(with_evaluation: bool) -> None:
             lr_scheduler,
             lr_warmup_steps,
             image_augmentation,
-            cache_images_on_gpu,
         )
         if with_evaluation:
             checkpoint = output_dir / "checkpoints" / "latest.ckpt"

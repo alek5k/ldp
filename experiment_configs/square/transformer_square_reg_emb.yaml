@@ -38,7 +38,7 @@ logging:
   id: null
   mode: online
   name: ptp_square
-  project: diffusion_pickandplace_real
+  project: ldp_temporal_diffusion_policy
   resume: true
   tags:
   - train_diffusion_transformer_hybrid

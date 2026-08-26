@@ -8,6 +8,12 @@ global_horizon: 32
 global_obs: 20
 global_action: 8
 subsample_frames: 20
+task:
+  dataset:
+    dataset_path: data/longhistsquare100/demos.hdf5
+  dataset_path: data/longhistsquare100/demos.hdf5
+  env_runner:
+    dataset_path: data/longhistsquare100/demos.hdf5
 
 training:
   num_epochs: 500

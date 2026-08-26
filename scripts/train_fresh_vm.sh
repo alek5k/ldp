@@ -171,8 +171,34 @@ download_observation_encoders() {
     download_google_drive_zip "1tSYyWg3HZbTtEhzpAXQpl28DSrWsXc7J" "obs_encoders.zip" "${REPO_DIR}/obs_encoders" "${REPO_DIR}" true
 }
 
+cache_ptp_embeddings() {
+    local checkpoint dataset_path cache_log_dir
+    [[ "${TRAINING_METHOD}" == "ptp" ]] || return 0
+    case "${TARGET_ENVIRONMENT}" in
+        square)
+            checkpoint="${REPO_DIR}/obs_encoders/square_encoder.ckpt"
+            dataset_path="${DATA_ROOT}/robomimic/datasets/square/mh/image_abs.hdf5"
+            ;;
+        tool-hang|tool_hang)
+            checkpoint="${REPO_DIR}/obs_encoders/tool_hang_encoder.ckpt"
+            dataset_path="${DATA_ROOT}/robomimic/datasets/tool_hang/ph/image_abs.hdf5"
+            ;;
+        transport)
+            checkpoint="${REPO_DIR}/obs_encoders/transport_encoder.ckpt"
+            dataset_path="${DATA_ROOT}/robomimic/datasets/transport/mh/image_abs.hdf5"
+            ;;
+        lh-aloha|lh-square) return 0 ;;
+        *) echo "PTP embedding caching is unsupported for ${TARGET_ENVIRONMENT}." >&2; return 1 ;;
+    esac
+    cache_log_dir="${DATA_ROOT}/embedding_cache_logs/${TARGET_ENVIRONMENT}"
+    log "Writing cached image embeddings for ${TARGET_ENVIRONMENT}"
+    CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" python rewrite_with_embeddings.py \
+        -c "${checkpoint}" -o "${cache_log_dir}" -f "${dataset_path}" -d cuda:0
+}
+
 download_selected_dataset
 download_observation_encoders
+cache_ptp_embeddings
 
 next_available_run_name() {
     local output_root="$1" base_name="$2" candidate="$2" attempt=2
@@ -217,14 +243,16 @@ run_training() {
             mkdir -p "${output_dir}"
             printf '%s\n' "${RUN_NOTE}" >"${output_dir}/note.txt"
         fi
-        overrides=("training.seed=$((TRAIN_SEED + i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}" "+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
+        overrides=("training.seed=$((TRAIN_SEED + i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}")
         [[ "${TRAIN_EPOCHS}" == "auto" ]] || overrides+=("training.num_epochs=${TRAIN_EPOCHS}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
         if [[ "${TRAINING_METHOD}" == lte ]]; then
+            overrides+=("+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
             [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
             overrides+=("policy.temporal_rgb_keys=[${lte_keys}]" "policy.temporal_multi_image_fusion_enabled=$([[ "${lte_keys}" == *,* ]] && echo true || echo false)" "policy.temporal_embedding_cache_enabled=${LTE_EMBEDDING_CACHE}" "policy.temporal_embedding_cache_start_epoch=${LTE_CACHE_START_EPOCH}" "policy.temporal_embedding_cache_warmup_epochs=${LTE_CACHE_WARMUP_EPOCHS}" "policy.temporal_embedding_cache_refresh_epochs=${LTE_CACHE_REFRESH_EPOCHS}" "policy.history_reconstruction.num_history_queries=${LTE_HISTORY_DECODER_SAMPLES}" "policy.temporal_latent_dim=${LTE_TEMPORAL_LATENT_DIM}" "policy.temporal_hidden_dim=${LTE_TEMPORAL_HIDDEN_DIM}" "policy.temporal_num_hidden_layers=${LTE_TEMPORAL_HIDDEN_LAYERS}" "policy.history_reconstruction.hidden_dim=${LTE_HISTORY_DECODER_HIDDEN_DIM}" "policy.history_reconstruction.num_hidden_layers=${LTE_HISTORY_DECODER_HIDDEN_LAYERS}")
             CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy ./train_lte_img_not.sh "${train_task}" "${output_dir}" "${overrides[@]}"
         else
+            overrides+=("+task.dataset.cache_images_on_gpu=false")
             case "${TARGET_ENVIRONMENT}" in
                 square) config_dir=experiment_configs/square; config_name=transformer_square_paper ;;
                 tool-hang) config_dir=experiment_configs/tool; config_name=transformer_tool_hang_paper ;;

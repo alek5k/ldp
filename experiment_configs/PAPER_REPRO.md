@@ -3,8 +3,11 @@
 The `*_paper.yaml` files reproduce the long-context diffusion + PTP settings
 reported in *Learning Long-Context Diffusion Policies via Past-Token
 Prediction*. They compose the corresponding `*_emb.yaml` configuration, which
-freezes a short-context visual encoder. Run the short-context encoder-pretrain
-stage and generate its cached image embeddings before using these configs.
+freezes a short-context visual encoder and consumes cached image embeddings.
+For the raw Robomimic tasks (Square, Tool Hang, and Transport), the experiment
+CLI and VM training script regenerate the required `embedding` field with
+`rewrite_with_embeddings.py` before launching training. The supplied
+long-horizon ALOHA and Square datasets are used as-is; they are not rewritten.
 
 | Task | Observations | Horizon | Action chunk | Subsampling | Epochs |
 | --- | ---: | ---: | ---: | ---: | ---: |
