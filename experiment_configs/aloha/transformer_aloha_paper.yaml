@@ -4,10 +4,14 @@ defaults:
   - transformer_aloha_emb
   - _self_
 
-global_horizon: 32
+global_horizon: 48
 global_obs: 32
 global_action: 8
 subsample_frames: 20
+subsampling_method: uniform
+
+policy:
+  past_action_pred: true
 
 training:
   num_epochs: 1500

@@ -6,11 +6,11 @@ set -Eeuo pipefail
 # QUICK CONFIGURATION -- edit this section for each training job.
 ###############################################################################
 
-TARGET_ENVIRONMENT="lh-square"           # square | transport | tool-hang | lh-aloha | lh-square
-TRAINING_METHOD="lte"                 # lte | ptp
+TARGET_ENVIRONMENT="square"           # square | transport | tool-hang | lh-aloha | lh-square
+TRAINING_METHOD="ptp"                 # lte | ptp
 LTE_ARCHITECTURE="unet"               # transformer | unet
 TRAIN_BATCH_SIZE=64
-TRAIN_EPOCHS=500
+TRAIN_EPOCHS="auto"                  # auto: retain the selected config's epoch count.
 RUN_NOTE=""                          # Written to note.txt for each launched run; blank disables it.
 
 LTE_IMAGE_COUNT=1                     # First N RGB cameras for the target environment.
@@ -115,9 +115,9 @@ python -c 'import os, wandb; wandb.login(key=os.environ["WANDB_API_KEY"], relogi
 
 download_google_drive_zip() {
     local file_id="$1" archive_name="$2" expected_path="$3"
-    local extract_root="${4:-${DATA_ROOT}}" archive_path cookie_file html_file uuid confirm final_url
+    local extract_root="${4:-${DATA_ROOT}}" force_download="${5:-false}" archive_path cookie_file html_file uuid confirm final_url
     archive_path="${extract_root}/${archive_name}"
-    if [[ -e "${expected_path}" ]]; then
+    if [[ "${force_download}" != "true" && -e "${expected_path}" ]]; then
         log "Dataset already present: ${expected_path}"
         return
     fi
@@ -167,7 +167,8 @@ download_selected_dataset() {
 
 download_observation_encoders() {
     [[ "${TRAINING_METHOD}" == "ptp" && "${DOWNLOAD_OBS_ENCODERS}" == "true" ]] || return 0
-    download_google_drive_zip "1tSYyWg3HZbTtEhzpAXQpl28DSrWsXc7J" "obs_encoders.zip" "${REPO_DIR}/obs_encoders" "${REPO_DIR}"
+    # README.md's shared archive is extracted before every PTP run.
+    download_google_drive_zip "1tSYyWg3HZbTtEhzpAXQpl28DSrWsXc7J" "obs_encoders.zip" "${REPO_DIR}/obs_encoders" "${REPO_DIR}" true
 }
 
 download_selected_dataset
@@ -216,7 +217,8 @@ run_training() {
             mkdir -p "${output_dir}"
             printf '%s\n' "${RUN_NOTE}" >"${output_dir}/note.txt"
         fi
-        overrides=("training.num_epochs=${TRAIN_EPOCHS}" "training.seed=$((TRAIN_SEED + i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}" "+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
+        overrides=("training.seed=$((TRAIN_SEED + i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}" "+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
+        [[ "${TRAIN_EPOCHS}" == "auto" ]] || overrides+=("training.num_epochs=${TRAIN_EPOCHS}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
         if [[ "${TRAINING_METHOD}" == lte ]]; then
             [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")

@@ -2415,6 +2415,52 @@ def _print_config_diff(first_run: Path, second_run: Path) -> None:
         )
 
 
+def _print_resolved_run_config(run_dir: Path, label: str | None = None) -> None:
+    """Print a saved run's fully resolved configuration as YAML."""
+    config = OmegaConf.create(_load_saved_run_config(run_dir))
+    title = label or run_dir.name
+    print(f"\nResolved config: {title}\n")
+    print(OmegaConf.to_yaml(config, resolve=True), end="")
+
+
+def _explore_run_config() -> None:
+    """Interactively print one saved training or evaluation run's config."""
+    run_kind = _prompt_menu(
+        "Explore config for: ", ["training run", "evaluation run", "back"]
+    )
+    if run_kind == "back":
+        return
+    if run_kind == "training run":
+        runs = sorted(_saved_training_runs(), key=lambda run: _run_sort_key(run.name))
+        if not runs:
+            print("No saved training runs with saved configs.")
+            return
+        selected = _select_run_index(
+            "Select training run: ",
+            [run.name for run in runs],
+            [_run_sort_key(run.name)[0] for run in runs],
+            [_run_note_label(run) for run in runs],
+        )
+        _print_resolved_run_config(runs[selected])
+        return
+
+    evaluations = sorted(
+        _saved_evaluation_runs(), key=lambda pair: _run_sort_key(pair[1].name)
+    )
+    if not evaluations:
+        print("No evaluation runs with resolvable training configs.")
+        return
+    labels = [f"{eval_dir.name}  <-  {train_run.name}" for eval_dir, train_run in evaluations]
+    selected = _select_run_index(
+        "Select evaluation run: ",
+        labels,
+        [_run_sort_key(train_run.name)[0] for _, train_run in evaluations],
+        [_evaluation_note_label(eval_dir) for eval_dir, _ in evaluations],
+    )
+    eval_dir, train_run = evaluations[selected]
+    _print_resolved_run_config(train_run, f"{eval_dir.name}  <-  {train_run.name}")
+
+
 def _compare_run_configs() -> None:
     """Interactively compare two saved training configs or their evaluations."""
     run_kind = _prompt_menu(
@@ -2474,6 +2520,7 @@ def main() -> None:
                 "show disk usage",
                 "show GPU status (nvidia-smi)",
                 "show GPU memory by process",
+                "config explorer",
                 "config diff",
                 "exit",
             ],
@@ -2509,6 +2556,8 @@ def main() -> None:
                 _show_gpu_status()
             elif action == "show GPU memory by process":
                 _show_gpu_memory_by_process()
+            elif action == "config explorer":
+                _explore_run_config()
             else:
                 _compare_run_configs()
         except (OSError, RuntimeError, ValueError) as exc:

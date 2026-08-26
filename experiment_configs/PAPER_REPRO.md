@@ -12,13 +12,13 @@ stage and generate its cached image embeddings before using these configs.
 | Tool Hang | 16 | 32 | 8 | 1 | 500 |
 | Transport | 16 | 32 | 8 | 1 | 500 |
 | Long-Horizon Square | 20 | 32 | 8 | 20 | 500 |
-| Long-Horizon ALOHA | 32 | 32 | 8 | 20 | 1500 |
+| Long-Horizon ALOHA | 32 | 48 | 8 | 20 | 1500 |
 
 The paper's primary simulation comparison uses action chunks of eight. For a
 fully closed-loop experiment, override `global_action=1` rather than changing
 the reproduction config.
 
-The appendix explicitly reports the observation count, subsampling rate, and
-epoch count for the two long-horizon tasks, but not a separate prediction
-horizon for their 20- and 32-observation settings. Those configs retain the
-public implementation's `global_horizon=32`.
+The paper explicitly gives horizon 32 for 16 observations. Long-Horizon Square
+keeps the public configuration's horizon 32, leaving 12 future tokens for its
+20 observations. LH ALOHA uses horizon 48 to avoid its otherwise zero-length
+future window at 32 observations.
