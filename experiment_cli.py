@@ -73,11 +73,11 @@ LAUNCHER_EPOCH_CONFIGS = {
     "liftqa": "liftqa/lte_img_not.yaml",
 }
 PTP_TASK_CONFIGS = {
-    "square": REPO_ROOT / "experiment_configs" / "square" / "transformer_square.yaml",
-    "tool-hang": REPO_ROOT / "experiment_configs" / "tool" / "transformer_tool_hang.yaml",
-    "transport": REPO_ROOT / "experiment_configs" / "transport" / "transformer_transport.yaml",
-    "lh-aloha": REPO_ROOT / "experiment_configs" / "aloha" / "transformer_aloha.yaml",
-    "lh-square": REPO_ROOT / "experiment_configs" / "longhist" / "transformer_longhist.yaml",
+    "square": REPO_ROOT / "experiment_configs" / "square" / "transformer_square_paper.yaml",
+    "tool-hang": REPO_ROOT / "experiment_configs" / "tool" / "transformer_tool_hang_paper.yaml",
+    "transport": REPO_ROOT / "experiment_configs" / "transport" / "transformer_transport_paper.yaml",
+    "lh-aloha": REPO_ROOT / "experiment_configs" / "aloha" / "transformer_aloha_paper.yaml",
+    "lh-square": REPO_ROOT / "experiment_configs" / "longhist" / "transformer_longhist_paper.yaml",
 }
 STALE_PROGRESS_SECONDS = 15 * 60
 RUN_NOTE_FILENAME = "note.txt"
@@ -164,6 +164,23 @@ def _prompt_float(prompt: str, default: float, minimum: float = 0.0) -> float:
 def _prompt_text(prompt: str, default: str) -> str:
     answer = input(f"{prompt} [{default}]: ").strip()
     return answer or default
+
+
+def _prompt_run_note() -> str:
+    """Collect one optional note to seed every run in a launch."""
+    while True:
+        note = input(f"Run note (blank for none, max {RUN_NOTE_MAX_LENGTH}): ").strip()
+        if len(note) <= RUN_NOTE_MAX_LENGTH:
+            return note
+        print(f"Enter at most {RUN_NOTE_MAX_LENGTH} characters.")
+
+
+def _write_initial_run_note(output_dir: Path, note: str) -> None:
+    """Create the optional run note before the detached training command starts."""
+    if not note:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / RUN_NOTE_FILENAME).write_text(f"{note}\n", encoding="utf-8")
 
 
 def _prompt_bool(prompt: str, default: bool) -> bool:
@@ -810,6 +827,7 @@ def _start_training(with_evaluation: bool) -> None:
         cache_warmup_epochs=cache_warmup_epochs,
         cache_refresh_epochs=cache_refresh_epochs,
     )
+    run_note = _prompt_run_note()
     record_zarr = True
     if with_evaluation:
         n_test = _prompt_int("Evaluation test episodes", default=200, minimum=1)
@@ -822,6 +840,7 @@ def _start_training(with_evaluation: bool) -> None:
 
     commands = []
     for seed, output_dir, inference_dir in runs:
+        _write_initial_run_note(output_dir, run_note)
         train = _training_command(
             task,
             output_dir,
@@ -885,6 +904,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
         "Cache raw images on GPU (faster input, uses GPU RAM)", default=False
     )
     runs = _planned_ptp_runs(task)
+    run_note = _prompt_run_note()
     if with_evaluation:
         n_test = _prompt_int("Evaluation test episodes", default=200, minimum=1)
         test_start_seed = _prompt_int(
@@ -896,6 +916,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
 
     commands = []
     for seed, output_dir, inference_dir in runs:
+        _write_initial_run_note(output_dir, run_note)
         train = _ptp_training_command(
             config_path,
             output_dir,
@@ -1029,6 +1050,12 @@ def _training_epoch_limit(run_dir: Path) -> str:
         config_path.read_text(encoding="utf-8", errors="replace"),
     )
     return match.group(1) if match else "?"
+
+
+def _training_epoch_progress_label(run_dir: Path) -> str:
+    """Return current/total epochs for compact run-selection tables."""
+    current = _latest_epoch(run_dir / "logs.json.txt") or 0
+    return f"{current}/{_training_epoch_limit(run_dir)}"
 
 
 def _evaluation_checkpoint_file(evaluation_dir: Path) -> str | None:
@@ -1367,18 +1394,21 @@ def _add_run_note() -> None:
     if run_type == "back":
         return
     if run_type == "training run":
-        candidates = _training_run_directories()
+        candidates = sorted(_training_run_directories(), key=lambda path: _run_sort_key(path.name))
     else:
         root = REPO_ROOT / "data" / "inference"
         candidates = sorted(
             (path for path in root.iterdir() if path.is_dir() and not path.is_symlink()),
-            key=lambda path: path.name,
+            key=lambda path: _run_sort_key(path.name),
         ) if root.is_dir() else []
     if not candidates:
         print(f"No {run_type}s found.")
         return
-    selected = _prompt_menu("Select run: ", [path.name for path in candidates])
-    run_dir = next(path for path in candidates if path.name == selected)
+    labels = [path.name for path in candidates]
+    notes = [_run_note_label(path) for path in candidates]
+    groups = [_run_sort_key(path.name)[0] for path in candidates]
+    selected_index = _select_run_index("Select run: ", labels, groups, notes)
+    run_dir = candidates[selected_index]
     current_note = _run_note_label(run_dir)
     if current_note:
         print(f"Current note: {current_note}")
@@ -2185,17 +2215,80 @@ def _saved_evaluation_runs() -> list[tuple[Path, Path]]:
     return resolved_runs
 
 
+def _select_run_index(
+    prompt: str, labels: list[str], groups: list[str], notes: list[str],
+) -> int:
+    """Select one numbered run from a grouped table with its existing note."""
+    number_width = len(str(len(labels)))
+    run_width = max(len("Run"), *(len(label) for label in labels))
+    note_width = _note_column_width(notes)
+    print()
+    print(
+        f"  {'#':>{number_width}} | {'Run':<{run_width}} | "
+        f"{'Note':<{note_width}}"
+    )
+    divider = f"  {'-' * number_width}-|-{'-' * run_width}-|-{'-' * note_width}"
+    print(divider)
+    previous_group = None
+    for index, (label, group, note) in enumerate(zip(labels, groups, notes), start=1):
+        if previous_group is not None and group != previous_group:
+            print(divider)
+        print(
+            f"  {index:>{number_width}} | {label:<{run_width}} | "
+            f"{_truncate_note(note, note_width):<{note_width}}"
+        )
+        previous_group = group
+    while True:
+        answer = input(prompt).strip()
+        try:
+            selected = int(answer) - 1
+            if selected < 0 or selected >= len(labels):
+                raise ValueError
+            return selected
+        except ValueError:
+            print(f"Enter a number from 1 to {len(labels)}.")
+
+
 def _select_two_run_indices(
-    prompt: str, labels: list[str], groups: list[str] | None = None,
+    prompt: str,
+    labels: list[str],
+    groups: list[str] | None = None,
+    notes: list[str] | None = None,
+    epochs: list[str] | None = None,
 ) -> tuple[int, int]:
     """Prompt once for two distinct comma-separated run numbers."""
     print()
+    number_width = len(str(len(labels)))
+    run_width = max(len("Run"), *(len(label) for label in labels))
+    note_width = _note_column_width(notes) if notes is not None else 0
+    epoch_width = max(len("Epoch"), *(len(epoch) for epoch in epochs)) if epochs else 0
+    if notes is not None:
+        header = f"  {'#':>{number_width}} | {'Run':<{run_width}}"
+        divider = f"  {'-' * number_width}-|-{'-' * run_width}"
+        if epochs is not None:
+            header += f" | {'Epoch':>{epoch_width}}"
+            divider += f"-|-{'-' * epoch_width}"
+        print(header + f" | {'Note':<{note_width}}")
+        print(divider + f"-|-{'-' * note_width}")
     previous_group = None
     for index, label in enumerate(labels, start=1):
         group = groups[index - 1] if groups is not None else None
         if previous_group is not None and group != previous_group:
-            print(f"  {'-' * 72}")
-        print(f"  {index}. {label}")
+            if notes is None:
+                print(f"  {'-' * 72}")
+            else:
+                divider = f"  {'-' * number_width}-|-{'-' * run_width}"
+                if epochs is not None:
+                    divider += f"-|-{'-' * epoch_width}"
+                print(divider + f"-|-{'-' * note_width}")
+        if notes is None:
+            print(f"  {index}. {label}")
+        else:
+            note = _truncate_note(notes[index - 1], note_width)
+            row = f"  {index:>{number_width}} | {label:<{run_width}}"
+            if epochs is not None:
+                row += f" | {epochs[index - 1]:>{epoch_width}}"
+            print(row + f" | {note:<{note_width}}")
         previous_group = group
     while True:
         answer = input(f"Select two {prompt}s (for example 1,2): ").strip()
@@ -2338,6 +2431,8 @@ def _compare_run_configs() -> None:
             "training run",
             [run.name for run in runs],
             [_run_sort_key(run.name)[0] for run in runs],
+            [_run_note_label(run) for run in runs],
+            [_training_epoch_progress_label(run) for run in runs],
         )
         _print_config_diff(runs[first_index], runs[second_index])
         return
@@ -2353,6 +2448,7 @@ def _compare_run_configs() -> None:
         "evaluation run",
         labels,
         [_run_sort_key(train_run.name)[0] for _, train_run in evaluations],
+        [_evaluation_note_label(eval_dir) for eval_dir, _ in evaluations],
     )
     _print_config_diff(evaluations[first_index][1], evaluations[second_index][1])
 

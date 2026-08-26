@@ -1,0 +1,13 @@
+# Paper-reproduction long-context PTP stage. The paper specifies 32 observed
+# frames sampled every 20 frames for Long-Horizon ALOHA.
+defaults:
+  - transformer_aloha_emb
+  - _self_
+
+global_horizon: 32
+global_obs: 32
+global_action: 8
+subsample_frames: 20
+
+training:
+  num_epochs: 1500

@@ -1,0 +1,13 @@
+# Paper-reproduction long-context PTP stage. Pretrain the encoder separately,
+# then use the frozen encoder/cached-embedding setup from the base config.
+defaults:
+  - transformer_transport_emb
+  - _self_
+
+global_horizon: 32
+global_obs: 16
+global_action: 8
+subsample_frames: 1
+
+training:
+  num_epochs: 500
