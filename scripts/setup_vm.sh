@@ -5,14 +5,14 @@
 set -Eeuo pipefail
 umask 077
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Keep credentials out of the setup script and repository. An absolute or
+# alternate path can be supplied with LDP_VM_CREDENTIALS_FILE.
+CREDENTIALS_FILE="${LDP_VM_CREDENTIALS_FILE:-${SCRIPT_DIR}/vm_credentials.sh}"
+
 ###############################################################################
 # QUICK CONFIGURATION -- normally the only section you need to edit.
 ###############################################################################
-
-# Auth Tokens
-GITHUB_TOKEN=""
-WANDB_API_KEY=""
-NTFY_AUTH_TOKEN=""
 
 RUN_SETUP=true                        # false: reuse the existing checkout and Conda environment.
 
@@ -36,6 +36,23 @@ DATA_ROOT=""
 EXTERNAL_OUTPUT_ROOT=""
 
 ###############################################################################
+
+if [[ -r "${CREDENTIALS_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${CREDENTIALS_FILE}"
+elif [[ -z "${WANDB_API_KEY:-}" ]]; then
+    cat >&2 <<EOF
+Missing VM credentials: ${CREDENTIALS_FILE}
+Copy scripts/vm_credentials.sh.example to that path, fill in the values, and
+run chmod 600 ${CREDENTIALS_FILE}. Alternatively set LDP_VM_CREDENTIALS_FILE.
+EOF
+    exit 1
+fi
+
+# GitHub and ntfy are optional for public clones and notification-free runs.
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+NTFY_AUTH_TOKEN="${NTFY_AUTH_TOKEN:-}"
+: "${WANDB_API_KEY:?WANDB_API_KEY must be set in ${CREDENTIALS_FILE} or the environment}"
 
 readonly MINIFORGE_VERSION="24.11.3-0"
 readonly MINIFORGE_BASE_URL="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}"
@@ -204,4 +221,4 @@ AUTH_FILE="${REPO_DIR}/.vm_auth.env"
         printf 'export NTFY_TOPIC=%q\n' "${NTFY_TOPIC}"
     } >"${AUTH_FILE}"
 )
-log "Environment setup complete. Run scripts/train_fresh_vm.sh to train."
+log "Environment setup complete. Run scripts/train_vm.sh to train."

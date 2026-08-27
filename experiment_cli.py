@@ -536,7 +536,13 @@ def _load_experiment_config(config_path: Path):
                 f"Unsupported Hydra default {default!r} in {config_path}; "
                 "use a standalone config for CLI prompts."
             )
-        default_path = config_path.parent / f"{default}.yaml"
+        # Hydra defaults beginning with ``/`` are rooted at the config search
+        # path, not at the filesystem root nor beside the current YAML file.
+        default_path = (
+            REPO_ROOT / "experiment_configs" / f"{default.lstrip('/')}.yaml"
+            if default.startswith("/")
+            else config_path.parent / f"{default}.yaml"
+        )
         if not default_path.is_file():
             raise ValueError(f"Missing default config {default_path}.")
         composed = OmegaConf.merge(composed, _load_experiment_config(default_path))
@@ -559,8 +565,11 @@ def _prompt_optimization_parameters(
         default=int(config.dataloader.get("num_workers", 0)),
         minimum=0,
     )
+    optimizer_lr = config.optimizer.get("learning_rate", config.optimizer.get("lr"))
+    if optimizer_lr is None:
+        raise ValueError(f"No learning-rate field found in {config_path}.")
     learning_rate = _prompt_float(
-        "Learning rate", default=float(config.optimizer.learning_rate), minimum=0.0
+        "Learning rate", default=float(optimizer_lr), minimum=0.0
     )
 
     lr_scheduler = None
@@ -683,6 +692,7 @@ def _ptp_training_command(
     lr_scheduler: str | None,
     lr_warmup_steps: int | None,
     image_augmentation: bool,
+    use_cached_embeddings: bool,
 ) -> str:
     """Build a PTP transformer launch using its direct Hydra config."""
     command = [
@@ -703,8 +713,14 @@ def _ptp_training_command(
         f"optimizer.learning_rate={learning_rate:g}",
         "+task.dataset.image_augmentation="
         f"{str(image_augmentation).lower()}",
-        # PTP consumes the precomputed embeddings. Retaining raw images on the
-        # GPU would only waste memory and prevents multi-worker loading.
+        # Set both sides explicitly: cached fields are optional and some
+        # legacy paper configs used a placeholder rather than a boolean.
+        "policy.use_embed_if_present="
+        f"{str(use_cached_embeddings).lower()}",
+        "task.dataset.use_embed_if_present="
+        f"{str(use_cached_embeddings).lower()}",
+        # Raw images stay on CPU in either mode; the DataLoader transfers the
+        # selected observations to the requested training GPU per batch.
         "+task.dataset.cache_images_on_gpu=false",
     ]
     if val_batch_size is not None:
@@ -964,6 +980,9 @@ def _start_ptp_training(with_evaluation: bool) -> None:
     image_augmentation = _prompt_bool(
         "Use ColorJitter image augmentation (can slow training)", default=False
     )
+    use_cached_embeddings = _prompt_bool(
+        "Use cached frozen observation embeddings for PTP", default=False
+    )
     runs = _planned_ptp_runs(task)
     run_note = _prompt_run_note()
     if with_evaluation:
@@ -980,10 +999,11 @@ def _start_ptp_training(with_evaluation: bool) -> None:
     if encoder_download is not None:
         print("PTP will download the missing observation-encoder bundle before training.")
         commands.append(encoder_download)
-    embedding_cache = _ptp_embedding_cache_command(task, config_path, gpu)
-    if embedding_cache is not None:
-        print("PTP will rebuild the Robomimic image-embedding field before training.")
-        commands.append(embedding_cache)
+    if use_cached_embeddings:
+        embedding_cache = _ptp_embedding_cache_command(task, config_path, gpu)
+        if embedding_cache is not None:
+            print("PTP will rebuild the Robomimic image-embedding field before training.")
+            commands.append(embedding_cache)
     for seed, output_dir, inference_dir in runs:
         _write_initial_run_note(output_dir, run_note)
         train = _ptp_training_command(
@@ -999,6 +1019,7 @@ def _start_ptp_training(with_evaluation: bool) -> None:
             lr_scheduler,
             lr_warmup_steps,
             image_augmentation,
+            use_cached_embeddings,
         )
         if with_evaluation:
             checkpoint = output_dir / "checkpoints" / "latest.ckpt"
@@ -1042,10 +1063,21 @@ def _prompt_evaluation_run() -> Path:
     runs = _available_evaluation_runs()
     if not runs:
         raise RuntimeError("No training runs with checkpoints found in either output root.")
-    labels = [f"{run.name} ({run.parent.name})" for run in runs]
     groups = [_run_sort_key(run.name)[0] for run in runs]
-    selected = _prompt_grouped_menu("Select training run: ", labels, groups)
-    return runs[labels.index(selected)]
+    evaluated_runs = {train_run for _, train_run in _saved_evaluation_runs()}
+    labels = [
+        f"{ANSI_COLORS['complete'] if run in evaluated_runs else ANSI_COLORS['failed']}"
+        f"{run.name}{ANSI_RESET}"
+        for run in runs
+    ]
+    selected = _select_run_index(
+        "Select training run: ",
+        labels,
+        groups,
+        [_run_note_label(run) for run in runs],
+        [_evaluation_epoch_label(run) for run in runs],
+    )
+    return runs[selected]
 
 
 def _prompt_checkpoint(run_dir: Path) -> Path:
@@ -1124,6 +1156,15 @@ def _training_epoch_progress_label(run_dir: Path) -> str:
     """Return current/total epochs for compact run-selection tables."""
     current = _latest_epoch(run_dir / "logs.json.txt") or 0
     return f"{current}/{_training_epoch_limit(run_dir)}"
+
+
+def _evaluation_epoch_label(run_dir: Path) -> str:
+    """Show unfinished training epochs in blue in the evaluation selector."""
+    label = _training_epoch_progress_label(run_dir)
+    current_text, total_text = label.split("/", maxsplit=1)
+    if total_text.isdigit() and int(current_text) < int(total_text):
+        return _progress_color(label, "active")
+    return label
 
 
 def _evaluation_checkpoint_file(evaluation_dir: Path) -> str | None:
@@ -2351,28 +2392,49 @@ def _saved_evaluation_runs() -> list[tuple[Path, Path]]:
 
 
 def _select_run_index(
-    prompt: str, labels: list[str], groups: list[str], notes: list[str],
+    prompt: str,
+    labels: list[str],
+    groups: list[str],
+    notes: list[str],
+    epochs: list[str] | None = None,
 ) -> int:
     """Select one numbered run from a grouped table with its existing note."""
     number_width = len(str(len(labels)))
-    run_width = max(len("Run"), *(len(label) for label in labels))
+    run_width = max(len("Run"), *(len(ANSI_ESCAPE_RE.sub("", label)) for label in labels))
     note_width = _note_column_width(notes)
-    print()
-    print(
-        f"  {'#':>{number_width}} | {'Run':<{run_width}} | "
-        f"{'Note':<{note_width}}"
+    if epochs is not None and len(epochs) != len(labels):
+        raise ValueError("Epoch entries must match selectable runs.")
+    epoch_width = (
+        max(len("Epoch"), *(len(ANSI_ESCAPE_RE.sub("", epoch)) for epoch in epochs))
+        if epochs is not None else 0
     )
+    print()
+    header = f"  {'#':>{number_width}} | {'Run':<{run_width}}"
+    if epochs is not None:
+        header += f" | {'Epoch':>{epoch_width}}"
+    print(header + f" | {'Note':<{note_width}}")
     divider = f"  {'-' * number_width}-|-{'-' * run_width}-|-{'-' * note_width}"
+    if epochs is not None:
+        divider = f"  {'-' * number_width}-|-{'-' * run_width}-|-{'-' * epoch_width}-|-{'-' * note_width}"
     print(divider)
     previous_group = None
     for index, (label, group, note) in enumerate(zip(labels, groups, notes), start=1):
         if previous_group is not None and group != previous_group:
             print(divider)
-        print(
-            f"  {index:>{number_width}} | {label:<{run_width}} | "
-            f"{_truncate_note(note, note_width):<{note_width}}"
+        row = (
+            f"  {index:>{number_width}} | {label}"
+            f"{' ' * (run_width - len(ANSI_ESCAPE_RE.sub('', label)))}"
         )
+        if epochs is not None:
+            epoch = epochs[index - 1]
+            row += f" | {' ' * (epoch_width - len(ANSI_ESCAPE_RE.sub('', epoch)))}{epoch}"
+        row += f" | {_truncate_note(note, note_width):<{note_width}}"
+        print(row)
         previous_group = group
+    if any(ANSI_ESCAPE_RE.search(label) for label in labels):
+        print("  Green = an evaluation already exists; red = no evaluation found.")
+    if epochs is not None:
+        print("  Blue epoch = training has not reached its configured epoch limit.")
     while True:
         answer = input(prompt).strip()
         try:

@@ -26,6 +26,7 @@ LTE_CACHE_WARMUP_EPOCHS=20
 LTE_CACHE_REFRESH_EPOCHS=5
 
 DOWNLOAD_OBS_ENCODERS=true            # Required by the default PTP paper configs.
+PTP_CACHED_EMBEDDINGS=false           # Raw features prevent stale-cache train/rollout mismatch.
 
 TRAIN_GPU="0"
 
@@ -173,7 +174,7 @@ download_observation_encoders() {
 
 cache_ptp_embeddings() {
     local checkpoint dataset_path cache_log_dir
-    [[ "${TRAINING_METHOD}" == "ptp" ]] || return 0
+    [[ "${TRAINING_METHOD}" == "ptp" && "${PTP_CACHED_EMBEDDINGS}" == "true" ]] || return 0
     case "${TARGET_ENVIRONMENT}" in
         square)
             checkpoint="${REPO_DIR}/obs_encoders/square_encoder.ckpt"
@@ -252,7 +253,11 @@ run_training() {
             overrides+=("policy.temporal_rgb_keys=[${lte_keys}]" "policy.temporal_multi_image_fusion_enabled=$([[ "${lte_keys}" == *,* ]] && echo true || echo false)" "policy.temporal_embedding_cache_enabled=${LTE_EMBEDDING_CACHE}" "policy.temporal_embedding_cache_start_epoch=${LTE_CACHE_START_EPOCH}" "policy.temporal_embedding_cache_warmup_epochs=${LTE_CACHE_WARMUP_EPOCHS}" "policy.temporal_embedding_cache_refresh_epochs=${LTE_CACHE_REFRESH_EPOCHS}" "policy.history_reconstruction.num_history_queries=${LTE_HISTORY_DECODER_SAMPLES}" "policy.temporal_latent_dim=${LTE_TEMPORAL_LATENT_DIM}" "policy.temporal_hidden_dim=${LTE_TEMPORAL_HIDDEN_DIM}" "policy.temporal_num_hidden_layers=${LTE_TEMPORAL_HIDDEN_LAYERS}" "policy.history_reconstruction.hidden_dim=${LTE_HISTORY_DECODER_HIDDEN_DIM}" "policy.history_reconstruction.num_hidden_layers=${LTE_HISTORY_DECODER_HIDDEN_LAYERS}")
             CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy ./train_lte_img_not.sh "${train_task}" "${output_dir}" "${overrides[@]}"
         else
-            overrides+=("+task.dataset.cache_images_on_gpu=false")
+            overrides+=(
+                "+task.dataset.cache_images_on_gpu=false"
+                "policy.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
+                "task.dataset.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
+            )
             case "${TARGET_ENVIRONMENT}" in
                 square) config_dir=experiment_configs/square; config_name=transformer_square_paper ;;
                 tool-hang) config_dir=experiment_configs/tool; config_name=transformer_tool_hang_paper ;;

@@ -11,9 +11,15 @@ subsample_frames: 20
 task:
   dataset:
     dataset_path: data/longhistsquare100/demos.hdf5
+    # Default to raw observations. Cached vectors can be stale or produced
+    # with different preprocessing from rollout, making the two diverge.
+    use_embed_if_present: false
   dataset_path: data/longhistsquare100/demos.hdf5
   env_runner:
     dataset_path: data/longhistsquare100/demos.hdf5
+
+policy:
+  use_embed_if_present: false
 
 training:
   num_epochs: 500

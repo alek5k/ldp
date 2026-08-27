@@ -12,6 +12,13 @@ subsampling_method: uniform
 
 policy:
   past_action_pred: true
+  # Default to raw observations. Cached vectors can be stale or produced with
+  # different preprocessing from rollout, making training and evaluation diverge.
+  use_embed_if_present: false
+
+task:
+  dataset:
+    use_embed_if_present: false
 
 training:
   num_epochs: 1500

@@ -4,6 +4,15 @@ defaults:
   - transformer_tool_hang_emb
   - _self_
 
+# Default to raw observations. Cached vectors can be stale or produced with
+# different preprocessing from rollout, making training and evaluation diverge.
+policy:
+  use_embed_if_present: false
+
+task:
+  dataset:
+    use_embed_if_present: false
+
 global_horizon: 32
 global_obs: 16
 global_action: 8
