@@ -23,6 +23,10 @@ class ImageNoTimeTemporalEncoder(nn.Module):
         self.recurrent = bool(recurrent)
         self.num_hidden_layers = int(num_hidden_layers)
         input_dim = self.image_embedding_dim + (self.latent_dim if recurrent else 0)
+        assert hidden_dim < input_dim, (
+            "ImageNoTimeTemporalEncoder hidden_dim must be smaller than its "
+            f"input layer ({hidden_dim} >= {input_dim})"
+        )
         layers = [nn.Linear(input_dim, hidden_dim), nn.SiLU()]
         for _ in range(self.num_hidden_layers - 1):
             layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.SiLU()])
@@ -91,7 +95,12 @@ class ImageHistoryDecoder(nn.Module):
         if num_hidden_layers < 1:
             raise ValueError("num_hidden_layers must be at least one")
         self.num_hidden_layers = int(num_hidden_layers)
-        layers = [nn.Linear(latent_dim + 1, hidden_dim), nn.SiLU()]
+        decoder_input_dim = int(latent_dim) + 1
+        assert hidden_dim > decoder_input_dim, (
+            "ImageHistoryDecoder hidden_dim must be larger than its input "
+            f"layer ({hidden_dim} <= {decoder_input_dim})"
+        )
+        layers = [nn.Linear(decoder_input_dim, hidden_dim), nn.SiLU()]
         for _ in range(self.num_hidden_layers - 1):
             layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.SiLU()])
         layers.append(nn.Linear(hidden_dim, image_embedding_dim))
@@ -147,7 +156,12 @@ class MultiImageHistoryDecoder(nn.Module):
         if num_hidden_layers < 1:
             raise ValueError("num_hidden_layers must be at least one")
         self.image_embedding_dims = tuple(int(dim) for dim in image_embedding_dims)
-        layers = [nn.Linear(latent_dim + 1, hidden_dim), nn.SiLU()]
+        decoder_input_dim = int(latent_dim) + 1
+        assert hidden_dim > decoder_input_dim, (
+            "MultiImageHistoryDecoder hidden_dim must be larger than its "
+            f"input layer ({hidden_dim} <= {decoder_input_dim})"
+        )
+        layers = [nn.Linear(decoder_input_dim, hidden_dim), nn.SiLU()]
         for _ in range(num_hidden_layers - 1):
             layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.SiLU()])
         self.trunk = nn.Sequential(*layers)
