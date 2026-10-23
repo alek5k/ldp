@@ -8,11 +8,11 @@ global_action: 1
 subsample_frames: 20
 subsampling_method: null
 checkpoint:
-  save_last_ckpt: true
+  save_last_ckpt: false
   save_last_snapshot: false
   topk:
     format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
-    k: 50
+    k: 1
     mode: max
     monitor_key: test_mean_score
 dataloader:

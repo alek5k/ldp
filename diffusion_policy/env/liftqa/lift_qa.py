@@ -705,8 +705,13 @@ class LiftQA(ManipulationEnv):
             self.finished_timer += 1.0 * (1/self.control_freq)
             if self.finished_timer >= 2.0: # wait at least 0.2 seconds before finishing
                 print(f"Reach the second goal")
-                reward = 1 if self.goal_stage == 2 else reward
+                # An early return terminates the attempt but is not success.
+                is_success = self.goal_stage == 2
+                reward = 1 if is_success else reward
+                info["is_success"] = is_success
                 done = True
+
+        info.setdefault("is_success", False)
         
         # Generic visit detection tracking
         if inside_goal_area and not self._visit_active:
@@ -862,4 +867,3 @@ if __name__ == "__main__":
     while True:
         env.step(np.zeros(env.action_dim))
         env.render()
-

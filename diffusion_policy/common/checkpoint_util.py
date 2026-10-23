@@ -1,5 +1,7 @@
 from typing import Optional, Dict
+from datetime import datetime
 import os
+from pathlib import Path
 
 class TopKCheckpointManager:
     def __init__(self,
@@ -41,9 +43,11 @@ class TopKCheckpointManager:
         if self.mode == 'max':
             if value > min_value:
                 delete_path = min_path
+                delete_value = min_value
         else:
             if value < max_value:
                 delete_path = max_path
+                delete_value = max_value
 
         if delete_path is None:
             return None
@@ -55,5 +59,16 @@ class TopKCheckpointManager:
                 os.mkdir(self.save_dir)
 
             if os.path.exists(delete_path):
+                deleted_size = os.path.getsize(delete_path)
                 os.remove(delete_path)
+                marker_path = Path(delete_path).with_suffix('.autocleaned.txt')
+                marker_path.write_text(
+                    f"original_checkpoint: {delete_path}\n"
+                    f"deleted_at: {datetime.now().astimezone().isoformat()}\n"
+                    f"replaced_by: {ckpt_path}\n"
+                    f"monitor_key: {self.monitor_key}\n"
+                    f"previous_value: {delete_value}\n"
+                    f"new_value: {value}\n"
+                    f"reclaimed_bytes: {deleted_size}\n"
+                )
             return ckpt_path

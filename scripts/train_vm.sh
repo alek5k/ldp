@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # QUICK CONFIGURATION -- edit this section for each training job.
 ###############################################################################
 
-TARGET_ENVIRONMENT="square"           # square | transport | tool-hang | lh-aloha | lh-square
+TARGET_ENVIRONMENT="lh-square"           # square | transport | tool-hang | lh-aloha | lh-square
 TRAINING_METHOD="ptp"                 # lte | ptp
 LTE_ARCHITECTURE="unet"               # transformer | unet
 TRAIN_BATCH_SIZE=64
@@ -26,7 +26,7 @@ LTE_CACHE_WARMUP_EPOCHS=20
 LTE_CACHE_REFRESH_EPOCHS=5
 
 DOWNLOAD_OBS_ENCODERS=true            # Required by the default PTP paper configs.
-PTP_CACHED_EMBEDDINGS=false           # Raw features prevent stale-cache train/rollout mismatch.
+PTP_CACHED_EMBEDDINGS=true           # Skips cache generation and passes raw observations through the frozen encoder during training and rollout. Setting to true seemed to create mismatch and 0 success.
 
 TRAIN_GPU="0"
 
@@ -40,6 +40,29 @@ TRAIN_LEARNING_RATE="0.0001"
 TRAIN_SEED=42
 TRAIN_SEQUENTIAL_RUNS=1
 SHUTDOWN_AFTER_COMPLETION=false
+
+###############################################################################
+
+# The first invocation writes a reproducible launcher and hands the complete
+# training workflow to a detached screen session. Set this to true only when
+# deliberately running the script inside an existing screen/session.
+LDP_VM_IN_SCREEN="${LDP_VM_IN_SCREEN:-false}"
+if [[ "${LDP_VM_IN_SCREEN}" != "true" ]]; then
+    SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+    safe_environment="${TARGET_ENVIRONMENT//[^[:alnum:]]/_}"
+    safe_method="${TRAINING_METHOD//[^[:alnum:]]/_}"
+    session_name="ldp-${safe_environment}-${safe_method}-$(date +%H%M%S)-$$"
+    launcher_path="$(mktemp --suffix=.sh "/tmp/ldp-train-${safe_environment}-${safe_method}-XXXXXX")"
+    # Snapshot the complete script, including the quick-configuration block,
+    # so the launched job remains inspectable and cannot change underneath us.
+    cp -- "${SCRIPT_PATH}" "${launcher_path}"
+    chmod 700 "${launcher_path}"
+    screen -dmS "${session_name}" env LDP_VM_IN_SCREEN=true bash "${launcher_path}"
+    printf 'Started detached screen session: %s\n' "${session_name}"
+    printf 'Launcher script: %s\n' "${launcher_path}"
+    printf 'Attach with: screen -r %s\n' "${session_name}"
+    exit 0
+fi
 
 ###############################################################################
 # MACHINE LOCATIONS -- normally leave unchanged.
@@ -188,7 +211,15 @@ cache_ptp_embeddings() {
             checkpoint="${REPO_DIR}/obs_encoders/transport_encoder.ckpt"
             dataset_path="${DATA_ROOT}/robomimic/datasets/transport/mh/image_abs.hdf5"
             ;;
-        lh-aloha|lh-square) return 0 ;;
+        # This encoder was trained on longhistsquare100 and produces an exact
+        # feature match for the current LH-Square observation encoder.
+        lh-square)
+            checkpoint="${REPO_DIR}/obs_encoders/longhist_encoder.ckpt"
+            dataset_path="${DATA_ROOT}/longhistsquare100/demos.hdf5"
+            ;;
+        # The supplied Aloha encoder expects 14-D qpos, while the single-arm
+        # LH-Aloha dataset supplies 7-D qpos, so it cannot safely be cached.
+        lh-aloha) return 0 ;;
         *) echo "PTP embedding caching is unsupported for ${TARGET_ENVIRONMENT}." >&2; return 1 ;;
     esac
     cache_log_dir="${DATA_ROOT}/embedding_cache_logs/${TARGET_ENVIRONMENT}"

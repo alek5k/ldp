@@ -387,13 +387,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 self.global_step += 1
                 self.epoch += 1
 
-        # ``latest.ckpt`` is normally saved on the checkpoint cadence, which
-        # can predate the last epoch.  Always save the completed model, then
-        # wait for every asynchronous checkpoint write before uploading all
-        # retained checkpoints.
+        # Wait for the retained scored checkpoint before uploading it. Resume
+        # checkpoints are deliberately disabled to avoid redundant writes.
         if self._saving_thread is not None:
             self._saving_thread.join()
-        self.save_checkpoint(use_thread=False)
         try:
             file_count = sync_run_folder_to_wandb(
                 wandb,

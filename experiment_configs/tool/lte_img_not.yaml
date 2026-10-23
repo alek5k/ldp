@@ -68,4 +68,4 @@ training:
 
 checkpoint:
   topk:
-    k: 5
+    k: 1

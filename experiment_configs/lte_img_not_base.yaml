@@ -153,9 +153,9 @@ checkpoint:
   topk:
     monitor_key: test_mean_score
     mode: max
-    k: 50
+    k: 1
     format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
-  save_last_ckpt: true
+  save_last_ckpt: false
   save_last_snapshot: false
 
 hydra:

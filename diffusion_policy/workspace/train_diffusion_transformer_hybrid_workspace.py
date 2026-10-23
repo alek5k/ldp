@@ -379,12 +379,10 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 self.global_step += 1
                 self.epoch += 1
 
-        # Save the actual completed model rather than only the most recent
-        # scheduled checkpoint, then upload every retained checkpoint after
-        # pending background writes have completed.
+        # Wait for the retained scored checkpoint before uploading it. Resume
+        # checkpoints are deliberately disabled to avoid redundant writes.
         if self._saving_thread is not None:
             self._saving_thread.join()
-        self.save_checkpoint(use_thread=False)
         try:
             file_count = sync_run_folder_to_wandb(
                 wandb,
