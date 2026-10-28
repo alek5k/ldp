@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch LTE-IMG-NoT training and evaluation runs in detached screen sessions."""
+"""Launch PTP training and evaluation runs in detached screen sessions."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from omegaconf import OmegaConf
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-TRAIN_SCRIPT = REPO_ROOT / "train_lte_img_not.sh"
 TRAIN_PY = REPO_ROOT / "train.py"
 EVAL_SCRIPT = REPO_ROOT / "eval.py"
 REWRITE_EMBEDDINGS_SCRIPT = REPO_ROOT / "rewrite_with_embeddings.py"
@@ -35,7 +34,6 @@ TASKS = (
     "waitatgoal",
     "liftqa",
 )
-UNET_ONLY_TASKS = frozenset(("lh-square", "waitatgoal", "liftqa"))
 # ``sim_max_reward`` is the maximum per-step reward for the standard
 # Robomimic tasks, but the temporal runner records the episode reward sum.
 # WaitAtGoal and LiftQA award 0.3, 0.6, then 1.0 for complete trajectories.
@@ -60,20 +58,6 @@ EXTERNAL_OUTPUT_ROOT = REPO_ROOT / "data" / "outputs_extdrive"
 # New training runs live on the external drive by default. Local and external
 # roots are both still searched by the progress and analysis tools.
 DEFAULT_OUTPUT_ROOT = EXTERNAL_OUTPUT_ROOT
-LAUNCHER_EPOCH_CONFIGS = {
-    "square": "square/lte_img_not.yaml",
-    "square-unet": "square/lte_img_not.yaml",
-    "tool_hang": "tool/lte_img_not.yaml",
-    "tool_hang-unet": "tool/lte_img_not.yaml",
-    "transport": "transport/lte_img_not.yaml",
-    "transport-unet": "transport/lte_img_not.yaml",
-    "lh-aloha": "aloha/lte_img_not.yaml",
-    "lh-aloha-unet": "aloha/lte_img_not.yaml",
-    "lh-square": "longhist/lte_img_not.yaml",
-    "lh-square-unet": "longhist/lte_img_not.yaml",
-    "waitatgoal": "waitatgoal/lte_img_not.yaml",
-    "liftqa": "liftqa/lte_img_not.yaml",
-}
 PTP_TASK_CONFIGS = {
     "square": REPO_ROOT / "experiment_configs" / "square" / "transformer_square_paper.yaml",
     "tool-hang": REPO_ROOT / "experiment_configs" / "tool" / "transformer_tool_hang_paper.yaml",
@@ -93,7 +77,7 @@ ANSI_COLORS = {
 ANSI_RESET = "\033[0m"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 WANDB_RUNNING_PREFIX = f"{ANSI_COLORS['active']}* "
-# These are the concrete environment tags emitted by the LTE base config's
+# These are the concrete environment tags emitted by the task configurations'
 # ``[name, task_name, exp_name]`` tags and by the PTP config ``logging.tags``.
 WANDB_ENVIRONMENT_TAGS = {
     "square": frozenset(("square_image_abs", "square_image")),
@@ -335,7 +319,7 @@ def _start_screen_session(session: str, command: str) -> None:
 
 
 def _environment_prefix(gpu: str) -> str:
-    # train_lte_img_not.sh calls `python`; prioritise the interpreter that
+    # Training scripts call `python`; prioritise the interpreter that
     # started this CLI so the screen process uses the same Conda environment.
     python_bin = Path(sys.executable).resolve().parent
     return " ".join((
@@ -345,23 +329,6 @@ def _environment_prefix(gpu: str) -> str:
         f"ROBOMIMIC_RENDER_GPU_DEVICE={shlex.quote(gpu)}",
         f"PATH={shlex.quote(str(python_bin))}:$PATH",
     ))
-
-
-def _run_name(
-    task: str,
-    decoder: str,
-    seed: int,
-    *,
-    temporal_embedding_cache: bool = False,
-    cache_start_epoch: int = 5,
-    cache_warmup_epochs: int = 20,
-    cache_refresh_epochs: int = 5,
-) -> str:
-    """Return a timestamped LTE run name without encoding hyperparameters."""
-    del seed, temporal_embedding_cache, cache_start_epoch
-    del cache_warmup_epochs, cache_refresh_epochs
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    return f"{task.replace('-', '_')}_lte_{decoder}_{timestamp}"
 
 
 def _ptp_run_name(task: str) -> str:
@@ -428,55 +395,8 @@ def _next_available_training_paths(output_root: Path, name: str) -> tuple[Path, 
         attempt += 1
 
 
-def _task_name(decoder: str) -> tuple[str, str, str]:
-    """Return the task name, launcher argument, and supported decoder."""
-    task = _prompt_menu("Select task: ", list(TASKS))
-    if task in UNET_ONLY_TASKS:
-        if decoder != "unet":
-            print(f"{task} currently has an LTE U-Net preset; using U-Net.")
-        return task, task, "unet"
-    launcher_task = task if decoder == "transformer" else f"{task}-unet"
-    return task, launcher_task, decoder
-
-
-def _planned_runs(
-    task: str,
-    decoder: str,
-    *,
-    temporal_embedding_cache: bool = False,
-    cache_start_epoch: int = 5,
-    cache_warmup_epochs: int = 20,
-    cache_refresh_epochs: int = 5,
-) -> list[tuple[int, Path, Path]]:
-    run_count = _prompt_int("Sequential runs", default=1, minimum=1)
-    first_seed = _prompt_int("First training seed", default=42, minimum=0)
-    default_output_root = DEFAULT_OUTPUT_ROOT.relative_to(REPO_ROOT)
-    output_root = Path(
-        input(f"Training output root [{default_output_root}]: ").strip()
-        or default_output_root
-    )
-    if not output_root.is_absolute():
-        output_root = REPO_ROOT / output_root
-
-    runs = []
-    for offset in range(run_count):
-        seed = first_seed + offset
-        name = _run_name(
-            task,
-            decoder,
-            seed,
-            temporal_embedding_cache=temporal_embedding_cache,
-            cache_start_epoch=cache_start_epoch,
-            cache_warmup_epochs=cache_warmup_epochs,
-            cache_refresh_epochs=cache_refresh_epochs,
-        )
-        output_dir, inference_dir = _next_available_training_paths(output_root, name)
-        runs.append((seed, output_dir, inference_dir))
-    return runs
-
-
 def _planned_ptp_runs(task: str) -> list[tuple[int, Path, Path]]:
-    """Plan PTP runs with the same output and collision rules as LTE runs."""
+    """Plan PTP runs with consistent output paths and collision handling."""
     run_count = _prompt_int("Sequential runs", default=1, minimum=1)
     first_seed = _prompt_int("First training seed", default=42, minimum=0)
     default_output_root = DEFAULT_OUTPUT_ROOT.relative_to(REPO_ROOT)
@@ -495,15 +415,6 @@ def _planned_ptp_runs(task: str) -> list[tuple[int, Path, Path]]:
         )
         runs.append((seed, output_dir, inference_dir))
     return runs
-
-
-def _config_default_epochs(launcher_task: str) -> int:
-    """Read the selected task preset rather than duplicating its epoch count."""
-    config_relpath = LAUNCHER_EPOCH_CONFIGS.get(launcher_task)
-    if config_relpath is None:
-        raise ValueError(f"No LTE epoch config registered for {launcher_task!r}")
-    config_path = REPO_ROOT / "experiment_configs" / config_relpath
-    return _config_path_default_epochs(config_path)
 
 
 def _config_path_default_epochs(config_path: Path) -> int:
@@ -586,97 +497,6 @@ def _prompt_optimization_parameters(
         )
     return (batch_size, val_batch_size, dataloader_workers, learning_rate,
             lr_scheduler, lr_warmup_steps)
-
-
-def _lte_rgb_keys(launcher_task: str) -> tuple[str, list[str]]:
-    """Resolve the primary and available LTE camera keys from the task preset."""
-    config_relpath = LAUNCHER_EPOCH_CONFIGS.get(launcher_task)
-    if config_relpath is None:
-        raise ValueError(f"No LTE task config registered for {launcher_task!r}")
-    config = OmegaConf.load(REPO_ROOT / "experiment_configs" / config_relpath)
-    task = config.task
-    primary_key = str(task.lte_temporal_rgb_key)
-    rgb_keys = [
-        str(key)
-        for key, metadata in task.shape_meta.obs.items()
-        if metadata.get("type", "low_dim") == "rgb"
-    ]
-    if primary_key not in rgb_keys:
-        raise ValueError(
-            f"Task {launcher_task!r} has non-RGB LTE key {primary_key!r}."
-        )
-    return primary_key, rgb_keys
-
-
-def _training_command(
-    task: str,
-    output_dir: Path,
-    seed: int,
-    gpu: str,
-    epochs: int,
-    *,
-    history_decoder_samples: int,
-    temporal_latent_dim: int,
-    temporal_encoder_hidden_dim: int,
-    temporal_encoder_hidden_layers: int,
-    history_decoder_hidden_dim: int,
-    history_decoder_hidden_layers: int,
-    temporal_embedding_cache: bool,
-    cache_start_epoch: int,
-    cache_warmup_epochs: int,
-    cache_refresh_epochs: int,
-    temporal_multi_image_fusion: bool,
-    temporal_rgb_keys: list[str] | None,
-    batch_size: int,
-    val_batch_size: int | None,
-    dataloader_workers: int,
-    learning_rate: float,
-    lr_scheduler: str | None,
-    lr_warmup_steps: int | None,
-    image_augmentation: bool,
-    cache_images_on_gpu: bool,
-) -> str:
-    command = [
-        str(TRAIN_SCRIPT),
-        task,
-        str(output_dir),
-        f"training.seed={seed}",
-        "training.device=cuda:0",
-        f"training.num_epochs={epochs}",
-        f"dataloader.batch_size={batch_size}",
-        f"dataloader.num_workers={dataloader_workers}",
-        f"optimizer.learning_rate={learning_rate:g}",
-        "+task.dataset.image_augmentation="
-        f"{str(image_augmentation).lower()}",
-        "+task.dataset.cache_images_on_gpu="
-        f"{str(cache_images_on_gpu).lower()}",
-        "policy.temporal_embedding_cache_enabled="
-        f"{str(temporal_embedding_cache).lower()}",
-        f"policy.temporal_embedding_cache_start_epoch={cache_start_epoch}",
-        f"policy.temporal_embedding_cache_warmup_epochs={cache_warmup_epochs}",
-        f"policy.temporal_embedding_cache_refresh_epochs={cache_refresh_epochs}",
-        "policy.history_reconstruction.num_history_queries="
-        f"{history_decoder_samples}",
-        f"policy.temporal_latent_dim={temporal_latent_dim}",
-        f"policy.temporal_hidden_dim={temporal_encoder_hidden_dim}",
-        f"policy.temporal_num_hidden_layers={temporal_encoder_hidden_layers}",
-        "policy.history_reconstruction.hidden_dim="
-        f"{history_decoder_hidden_dim}",
-        "policy.history_reconstruction.num_hidden_layers="
-        f"{history_decoder_hidden_layers}",
-        "policy.temporal_multi_image_fusion_enabled="
-        f"{str(temporal_multi_image_fusion).lower()}",
-    ]
-    if val_batch_size is not None:
-        command.append(f"val_dataloader.batch_size={val_batch_size}")
-        command.append(f"val_dataloader.num_workers={dataloader_workers}")
-    if lr_scheduler is not None:
-        command.append(f"training.lr_scheduler={lr_scheduler}")
-    if lr_warmup_steps is not None:
-        command.append(f"training.lr_warmup_steps={lr_warmup_steps}")
-    if temporal_rgb_keys:
-        command.append("policy.temporal_rgb_keys=[" + ",".join(temporal_rgb_keys) + "]")
-    return f"{_environment_prefix(gpu)} {shlex.join(command)}"
 
 
 def _ptp_training_command(
@@ -806,159 +626,8 @@ def _checkpoint_supports_zarr_export(checkpoint: Path) -> bool:
     if target:
         return any(module in target for module in ZARR_RUNNER_MODULES)
     # Older or manually moved runs may not retain Hydra metadata. All tasks
-    # managed by this LTE CLI use an image runner with Zarr export support.
+    # managed by this PTP CLI use an image runner with Zarr export support.
     return any(task.replace("-", "_") in checkpoint.parents[1].name for task in TASKS)
-
-
-def _start_training(with_evaluation: bool) -> None:
-    decoder = _prompt_menu("Select decoder: ", ["transformer (default)", "unet"])
-    decoder_name = "transformer" if decoder.startswith("transformer") else "unet"
-    base_task, task, decoder_name = _task_name(decoder_name)
-    gpu = _prompt_gpu()
-    epochs = _prompt_int(
-        "Training epochs", default=_config_default_epochs(task), minimum=1)
-    config_path = REPO_ROOT / "experiment_configs" / LAUNCHER_EPOCH_CONFIGS[task]
-    (
-        batch_size,
-        val_batch_size,
-        dataloader_workers,
-        learning_rate,
-        lr_scheduler,
-        lr_warmup_steps,
-    ) = _prompt_optimization_parameters(config_path)
-    history_decoder_samples = _prompt_int(
-        "History samples per LTE decoder reconstruction", default=16, minimum=1
-    )
-    temporal_latent_dim = _prompt_int(
-        "LTE temporal encoder latent dimension", default=64, minimum=1
-    )
-    temporal_encoder_hidden_dim = _prompt_int(
-        "LTE temporal encoder hidden dimension", default=256, minimum=1
-    )
-    temporal_encoder_hidden_layers = _prompt_int(
-        "LTE temporal encoder hidden layers", default=1, minimum=1
-    )
-    history_decoder_hidden_dim = _prompt_int(
-        "LTE history decoder hidden dimension", default=256, minimum=1
-    )
-    history_decoder_hidden_layers = _prompt_int(
-        "LTE history decoder hidden layers", default=1, minimum=1
-    )
-    temporal_multi_image_fusion = _prompt_bool(
-        "Fuse multiple RGB cameras into LTE", default=False
-    )
-    primary_rgb_key, available_rgb_keys = _lte_rgb_keys(task)
-    print(
-        "LTE RGB cameras: "
-        + ", ".join(available_rgb_keys)
-        + f" (single-camera default: {primary_rgb_key})"
-    )
-    temporal_rgb_keys: list[str] = [primary_rgb_key]
-    if temporal_multi_image_fusion:
-        raw_keys = input(
-            "LTE RGB keys (comma-separated; blank uses every RGB key): "
-        ).strip()
-        if raw_keys:
-            temporal_rgb_keys = [key.strip() for key in raw_keys.split(",") if key.strip()]
-        else:
-            temporal_rgb_keys = available_rgb_keys
-        if len(temporal_rgb_keys) < 2:
-            raise ValueError("Multi-image LTE requires at least two RGB keys.")
-        unknown_keys = set(temporal_rgb_keys) - set(available_rgb_keys)
-        if unknown_keys:
-            raise ValueError(
-                "Unknown LTE RGB key(s): " + ", ".join(sorted(unknown_keys))
-            )
-    temporal_embedding_cache = _prompt_bool(
-        "Cache detached LTE ResNet embeddings", default=base_task == "lh-square"
-    )
-    image_augmentation = _prompt_bool(
-        "Use ColorJitter image augmentation (can slow training)", default=False
-    )
-    cache_images_on_gpu = _prompt_bool(
-        "Cache raw images on GPU (faster input, uses GPU RAM)", default=False
-    )
-    cache_start_epoch = 5
-    cache_warmup_epochs = 20
-    cache_refresh_epochs = 5
-    if temporal_embedding_cache:
-        cache_start_epoch = _prompt_int(
-            "Start caching detached LTE ResNet embeddings at epoch",
-            default=cache_start_epoch,
-            minimum=0,
-        )
-        cache_warmup_epochs = _prompt_int(
-            "Refresh cache every epoch for the first N cached epochs",
-            default=cache_warmup_epochs,
-            minimum=0,
-        )
-        cache_refresh_epochs = _prompt_int(
-            "Refresh cache every N epochs afterwards",
-            default=cache_refresh_epochs,
-            minimum=1,
-        )
-    # The suffix is assigned only while planning a new launch. Existing and
-    # active LDP training or inference directories are never renamed.
-    runs = _planned_runs(
-        base_task,
-        decoder_name,
-        temporal_embedding_cache=temporal_embedding_cache,
-        cache_start_epoch=cache_start_epoch,
-        cache_warmup_epochs=cache_warmup_epochs,
-        cache_refresh_epochs=cache_refresh_epochs,
-    )
-    run_note = _prompt_run_note()
-    record_zarr = True
-    if with_evaluation:
-        n_test = _prompt_int("Evaluation test episodes", default=200, minimum=1)
-        test_start_seed = _prompt_int(
-            "Evaluation test-start seed", default=1000, minimum=0
-        )
-    else:
-        n_test = 0
-        test_start_seed = 0
-
-    commands = []
-    for seed, output_dir, inference_dir in runs:
-        _write_initial_run_note(output_dir, run_note)
-        train = _training_command(
-            task,
-            output_dir,
-            seed,
-            gpu,
-            epochs,
-            history_decoder_samples=history_decoder_samples,
-            temporal_latent_dim=temporal_latent_dim,
-            temporal_encoder_hidden_dim=temporal_encoder_hidden_dim,
-            temporal_encoder_hidden_layers=temporal_encoder_hidden_layers,
-            history_decoder_hidden_dim=history_decoder_hidden_dim,
-            history_decoder_hidden_layers=history_decoder_hidden_layers,
-            temporal_embedding_cache=temporal_embedding_cache,
-            cache_start_epoch=cache_start_epoch,
-            cache_warmup_epochs=cache_warmup_epochs,
-            cache_refresh_epochs=cache_refresh_epochs,
-            temporal_multi_image_fusion=temporal_multi_image_fusion,
-            temporal_rgb_keys=temporal_rgb_keys,
-            batch_size=batch_size,
-            val_batch_size=val_batch_size,
-            dataloader_workers=dataloader_workers,
-            learning_rate=learning_rate,
-            lr_scheduler=lr_scheduler,
-            lr_warmup_steps=lr_warmup_steps,
-            image_augmentation=image_augmentation,
-            cache_images_on_gpu=cache_images_on_gpu,
-        )
-        if with_evaluation:
-            checkpoint = output_dir / "checkpoints" / "latest.ckpt"
-            evaluate = _evaluation_command(
-                checkpoint, inference_dir, test_start_seed, gpu, n_test,
-                record_zarr=record_zarr,
-            )
-            commands.append(f"{train} && {evaluate}")
-        else:
-            commands.append(train)
-    label = f"{'train-eval' if with_evaluation else 'train'}-{task}-x{len(runs)}"
-    _start_screen_session(_make_screen_session(label), " && ".join(commands))
 
 
 def _start_ptp_training(with_evaluation: bool) -> None:
@@ -1038,15 +707,6 @@ def _start_ptp_training(with_evaluation: bool) -> None:
     _start_screen_session(_make_screen_session(label), " && ".join(commands))
 
 
-def _start_training_flow(with_evaluation: bool) -> None:
-    """Select between the LTE and PTP training workflows."""
-    method = _prompt_menu("Select training method: ", ["LTE-IMG-NoT", "PTP"])
-    if method == "PTP":
-        _start_ptp_training(with_evaluation)
-    else:
-        _start_training(with_evaluation)
-
-
 def _available_evaluation_runs() -> list[Path]:
     """Return training directories that have at least one selectable checkpoint."""
     return sorted(
@@ -1092,25 +752,11 @@ def _prompt_checkpoint(run_dir: Path) -> Path:
 
 
 def _evaluation_output_run_name(checkpoint: Path) -> str:
-    """Keep the selected training run name for independently launched evals."""
-    checkpoint_run_name = checkpoint.parents[1].name
-    if re.fullmatch(
-        r".+_(?:lte_(?:transformer|unet)|ptp)(?:_.+)?",
-        checkpoint_run_name,
-    ):
-        return checkpoint_run_name
-    legacy_match = re.fullmatch(
-        r"(?P<task>.+)_lte_(?P<decoder>transformer|unet)(?:_.+)?",
-        checkpoint_run_name,
-    )
-    if legacy_match:
-        return _run_name(
-            legacy_match.group("task"), legacy_match.group("decoder"), seed=0
-        )
-    raise ValueError(
-        "Select a timestamped LTE/PTP run or a legacy LTE run "
-        "(<env>_lte_<decoder>_...)."
-    )
+    """Preserve the selected PTP training run name for evaluation."""
+    run_name = checkpoint.parents[1].name
+    if not re.fullmatch(r".+_ptp(?:_.+)?", run_name):
+        raise ValueError("Select a PTP training run (<env>_ptp_...).")
+    return run_name
 
 
 def _start_evaluation() -> None:
@@ -2351,7 +1997,7 @@ def _eval_run_source_name(eval_dir: Path) -> str | None:
         except (OSError, json.JSONDecodeError):
             pass
     match = re.fullmatch(
-        r"(.+_(?:lte_(?:transformer|unet)|ptp)_\d{8}_\d{6})(?:-r\d+)?",
+        r"(.+_ptp_\d{8}_\d{6})(?:-r\d+)?",
         eval_dir.name,
     )
     if match:
@@ -2727,11 +2373,11 @@ def main() -> None:
             return
         try:
             if action == "train":
-                _start_training_flow(with_evaluation=False)
+                _start_ptp_training(with_evaluation=False)
             elif action == "eval":
                 _start_evaluation()
             elif action == "train+eval":
-                _start_training_flow(with_evaluation=True)
+                _start_ptp_training(with_evaluation=True)
             elif action == "progress":
                 _show_progress()
             elif action == "quick progress":

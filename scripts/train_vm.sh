@@ -7,23 +7,11 @@ set -Eeuo pipefail
 ###############################################################################
 
 TARGET_ENVIRONMENT="lh-square"           # square | transport | tool-hang | lh-aloha | lh-square
-TRAINING_METHOD="ptp"                 # lte | ptp
-LTE_ARCHITECTURE="unet"               # transformer | unet
+TRAINING_METHOD="ptp"                 # PTP baseline
 TRAIN_BATCH_SIZE=64
 TRAIN_EPOCHS="auto"                  # auto: retain the selected config's epoch count.
 RUN_NOTE=""                          # Written to note.txt for each launched run; blank disables it.
 
-LTE_IMAGE_COUNT=1                     # First N RGB cameras for the target environment.
-LTE_HISTORY_DECODER_SAMPLES=16
-LTE_TEMPORAL_LATENT_DIM=64
-LTE_TEMPORAL_HIDDEN_DIM=256
-LTE_TEMPORAL_HIDDEN_LAYERS=1
-LTE_HISTORY_DECODER_HIDDEN_DIM=256
-LTE_HISTORY_DECODER_HIDDEN_LAYERS=1
-LTE_EMBEDDING_CACHE=true
-LTE_CACHE_START_EPOCH=5
-LTE_CACHE_WARMUP_EPOCHS=20
-LTE_CACHE_REFRESH_EPOCHS=5
 
 DOWNLOAD_OBS_ENCODERS=true            # Required by the default PTP paper configs.
 PTP_CACHED_EMBEDDINGS=true           # Skips cache generation and passes raw observations through the frozen encoder during training and rollout. Setting to true seemed to create mismatch and 0 success.
@@ -244,31 +232,13 @@ next_available_run_name() {
 }
 
 run_training() {
-    local output_root run_name output_dir train_task lte_keys config_dir config_name timestamp
-    local -a overrides available
+    local output_root run_name output_dir config_dir config_name timestamp
+    local -a overrides
     output_root="${EXTERNAL_OUTPUT_ROOT:-${DATA_ROOT}/outputs}"
     mkdir -p "${output_root}"
     timestamp="$(date +%Y%m%d_%H%M%S)"
-    train_task="${TARGET_ENVIRONMENT/tool-hang/tool_hang}"
-    if [[ "${TRAINING_METHOD}" == lte ]]; then
-        if [[ "${LTE_ARCHITECTURE}" != transformer ]]; then
-            case "${train_task}" in square|tool_hang|transport|lh-aloha|lh-square) train_task+="-unet" ;; esac
-        fi
-        case "${TARGET_ENVIRONMENT}" in
-            square|lh-square) available=(agentview_image robot0_eye_in_hand_image) ;;
-            tool-hang) available=(sideview_image robot0_eye_in_hand_image) ;;
-            transport) available=(shouldercamera0_image shouldercamera1_image robot0_eye_in_hand_image) ;;
-            lh-aloha) available=(top right_wrist) ;;
-            *) available=(image) ;;
-        esac
-        lte_keys="$(IFS=,; echo "${available[*]:0:LTE_IMAGE_COUNT}")"
-    fi
     for ((i=0; i<TRAIN_SEQUENTIAL_RUNS; i++)); do
-        if [[ "${TRAINING_METHOD}" == lte ]]; then
-            run_name="${TARGET_ENVIRONMENT//-/_}_lte_${LTE_ARCHITECTURE}_${timestamp}"
-        else
-            run_name="${TARGET_ENVIRONMENT//-/_}_ptp_${timestamp}"
-        fi
+        run_name="${TARGET_ENVIRONMENT//-/_}_ptp_${timestamp}"
         run_name="$(next_available_run_name "${output_root}" "${run_name}")"
         output_dir="${output_root}/${run_name}"
         if [[ -n "${RUN_NOTE}" ]]; then
@@ -278,27 +248,20 @@ run_training() {
         overrides=("training.seed=$((TRAIN_SEED + i))" "training.device=cuda:0" "dataloader.batch_size=${TRAIN_BATCH_SIZE}" "val_dataloader.batch_size=${TRAIN_BATCH_SIZE}" "dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "val_dataloader.num_workers=${TRAIN_DATALOADER_WORKERS}" "dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "val_dataloader.pin_memory=${TRAIN_PIN_MEMORY}" "dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "val_dataloader.persistent_workers=${TRAIN_PERSISTENT_WORKERS}" "+dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+val_dataloader.prefetch_factor=${TRAIN_PREFETCH_FACTOR}" "+task.dataset.image_augmentation=${TRAIN_IMAGE_AUGMENTATION}")
         [[ "${TRAIN_EPOCHS}" == "auto" ]] || overrides+=("training.num_epochs=${TRAIN_EPOCHS}")
         log "Starting ${TRAINING_METHOD} training: ${run_name}"
-        if [[ "${TRAINING_METHOD}" == lte ]]; then
-            overrides+=("+task.dataset.cache_images_on_gpu=${TRAIN_CACHE_IMAGES_ON_GPU}")
-            [[ "${LTE_ARCHITECTURE}" == transformer ]] && overrides+=("optimizer.learning_rate=${TRAIN_LEARNING_RATE}") || overrides+=("optimizer.lr=${TRAIN_LEARNING_RATE}")
-            overrides+=("policy.temporal_rgb_keys=[${lte_keys}]" "policy.temporal_multi_image_fusion_enabled=$([[ "${lte_keys}" == *,* ]] && echo true || echo false)" "policy.temporal_embedding_cache_enabled=${LTE_EMBEDDING_CACHE}" "policy.temporal_embedding_cache_start_epoch=${LTE_CACHE_START_EPOCH}" "policy.temporal_embedding_cache_warmup_epochs=${LTE_CACHE_WARMUP_EPOCHS}" "policy.temporal_embedding_cache_refresh_epochs=${LTE_CACHE_REFRESH_EPOCHS}" "policy.history_reconstruction.num_history_queries=${LTE_HISTORY_DECODER_SAMPLES}" "policy.temporal_latent_dim=${LTE_TEMPORAL_LATENT_DIM}" "policy.temporal_hidden_dim=${LTE_TEMPORAL_HIDDEN_DIM}" "policy.temporal_num_hidden_layers=${LTE_TEMPORAL_HIDDEN_LAYERS}" "policy.history_reconstruction.hidden_dim=${LTE_HISTORY_DECODER_HIDDEN_DIM}" "policy.history_reconstruction.num_hidden_layers=${LTE_HISTORY_DECODER_HIDDEN_LAYERS}")
-            CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy ./train_lte_img_not.sh "${train_task}" "${output_dir}" "${overrides[@]}"
-        else
-            overrides+=(
-                "+task.dataset.cache_images_on_gpu=false"
-                "policy.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
-                "task.dataset.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
-            )
-            case "${TARGET_ENVIRONMENT}" in
-                square) config_dir=experiment_configs/square; config_name=transformer_square_paper ;;
-                tool-hang) config_dir=experiment_configs/tool; config_name=transformer_tool_hang_paper ;;
-                transport) config_dir=experiment_configs/transport; config_name=transformer_transport_paper ;;
-                lh-aloha) config_dir=experiment_configs/aloha; config_name=transformer_aloha_paper ;;
-                lh-square) config_dir=experiment_configs/longhist; config_name=transformer_longhist_paper ;;
-                *) echo "PTP is unsupported for ${TARGET_ENVIRONMENT}." >&2; return 1 ;;
-            esac
-            CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy python train.py --config-dir="${config_dir}" --config-name="${config_name}" hydra.run.dir="${output_dir}" "logging.name=${run_name}" logging.id=null "optimizer.learning_rate=${TRAIN_LEARNING_RATE}" "${overrides[@]}"
-        fi
+        overrides+=(
+            "+task.dataset.cache_images_on_gpu=false"
+            "policy.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
+            "task.dataset.use_embed_if_present=${PTP_CACHED_EMBEDDINGS}"
+        )
+        case "${TARGET_ENVIRONMENT}" in
+            square) config_dir=experiment_configs/square; config_name=transformer_square_paper ;;
+            tool-hang) config_dir=experiment_configs/tool; config_name=transformer_tool_hang_paper ;;
+            transport) config_dir=experiment_configs/transport; config_name=transformer_transport_paper ;;
+            lh-aloha) config_dir=experiment_configs/aloha; config_name=transformer_aloha_paper ;;
+            lh-square) config_dir=experiment_configs/longhist; config_name=transformer_longhist_paper ;;
+            *) echo "PTP is unsupported for ${TARGET_ENVIRONMENT}." >&2; return 1 ;;
+        esac
+        CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" MUJOCO_GL=egl SDL_VIDEODRIVER=dummy python train.py --config-dir="${config_dir}" --config-name="${config_name}" hydra.run.dir="${output_dir}" "logging.name=${run_name}" logging.id=null "optimizer.learning_rate=${TRAIN_LEARNING_RATE}" "${overrides[@]}"
     done
 }
 

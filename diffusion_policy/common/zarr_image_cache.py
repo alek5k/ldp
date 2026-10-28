@@ -1,6 +1,6 @@
 """Process-local RAM cache for temporal Zarr image arrays.
 
-The temporal image dataset and LTE policy run in the same training process.
+Temporal image datasets share their decoded-frame cache within a training process.
 Sharing this cache lets the normal observation path and the causal-prefix path
 use one decompressed array, matching the original eager dataset loader.
 """

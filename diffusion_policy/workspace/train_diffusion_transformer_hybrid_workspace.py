@@ -161,22 +161,12 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         # save batch for sampling
         train_sampling_batch = None
 
-        # LTE history frame indices select from a CPU-resident NumPy/Zarr
-        # cache. Keeping this metadata on CPU avoids synchronizing back from
-        # CUDA once per temporal image chunk.
-        temporal_history_cpu_keys = {
-            "temporal_history_image_indices",
-            "temporal_history_mask",
-            "temporal_obs_history_indices",
-        }
-
         def transfer_batch_to_device(batch):
             gpu_image_indices = batch.pop("gpu_image_indices", None)
             if gpu_image_indices is not None:
                 batch["obs"].update(dataset.gather_gpu_images(gpu_image_indices))
             return {
-                key: value if key in temporal_history_cpu_keys
-                else (
+                key: (
                     dict_apply(value, lambda x: x.to(device, non_blocking=True))
                     if isinstance(value, dict)
                     else value.to(device, non_blocking=True)
@@ -184,14 +174,6 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 for key, value in batch.items()
             }
 
-        def lte_loss_components() -> dict[str, float]:
-            getter = getattr(self.model, "get_last_loss_components", None)
-            if getter is None:
-                return {}
-            return {
-                name: float(value.item())
-                for name, value in getter().items()
-            }
 
         # training loop
         debug = True
@@ -200,15 +182,6 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
-                refresh_temporal_cache = getattr(
-                    self.model, "refresh_temporal_embedding_cache", None
-                )
-                if refresh_temporal_cache is not None and refresh_temporal_cache(self.epoch):
-                    print(
-                        "Refreshed detached LTE image-embedding cache "
-                        f"at epoch {self.epoch}."
-                    )
-
                 train_losses = list()
                 train_component_losses: dict[str, list[float]] = {}
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
@@ -221,7 +194,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         # compute loss
                         raw_loss = self.model.compute_loss(batch, debug)
                         debug = False
-                        component_values = lte_loss_components()
+                        component_values = {}
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
 
@@ -297,7 +270,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                                 batch = transfer_batch_to_device(batch)
                                 loss = self.model.compute_loss(batch)
                                 val_losses.append(loss)
-                                for name, value in lte_loss_components().items():
+                                for name, value in {}.items():
                                     val_component_losses.setdefault(name, []).append(value)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):

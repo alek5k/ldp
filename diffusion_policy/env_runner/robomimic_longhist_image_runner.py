@@ -408,11 +408,6 @@ class RobomimicImageRunner(BaseImageRunner):
             obs = env.reset()
             past_action = None
             policy.reset()
-            if hasattr(policy, "advance_temporal_state_from_observation"):
-                policy.advance_temporal_state_from_observation({
-                    key: torch.from_numpy(obs[key]).to(device)
-                    for key in getattr(policy, "temporal_rgb_keys", [policy.temporal_rgb_key])
-                })
 
             env_name = self.env_meta['env_name']
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval {env_name}Image {chunk_idx+1}/{n_chunks}", 
@@ -505,11 +500,6 @@ class RobomimicImageRunner(BaseImageRunner):
                     env_action = self.undo_transform_action(action)
 
                 obs, reward, done, info = env.step(env_action)
-                if hasattr(policy, "advance_temporal_state_from_observation"):
-                    policy.advance_temporal_state_from_observation({
-                        key: torch.from_numpy(obs[key]).to(device)
-                        for key in getattr(policy, "temporal_rgb_keys", [policy.temporal_rgb_key])
-                    })
                 done = np.all(done)
                 past_action = action
 
