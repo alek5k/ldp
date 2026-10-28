@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an LDP run after scripts/setup_fresh_vm.sh has prepared the VM.
+# Train an LDP run on a prepared VM.
 set -Eeuo pipefail
 
 ###############################################################################
@@ -60,7 +60,7 @@ REPO_DIR="$HOME/ldp"
 CONDA_DIR="$HOME/miniforge3"
 CONDA_ENV_NAME="robodiff-lh-5090"
 # Empty chooses the candidate filesystem with the most available space.
-# setup_fresh_vm.sh links ~/ldp/data there for configs using relative paths.
+# Link ~/ldp/data there when using configs with relative paths.
 DATA_ROOT=""
 EXTERNAL_OUTPUT_ROOT=""
 AUTH_FILE="$REPO_DIR/.vm_auth.env"
@@ -92,10 +92,10 @@ select_data_root() {
 DATA_ROOT="${DATA_ROOT:-$(select_data_root)}"
 
 if [[ ! -r "${AUTH_FILE}" ]]; then
-    echo "Missing ${AUTH_FILE}; run scripts/setup_fresh_vm.sh first." >&2
+    echo "Missing ${AUTH_FILE}; create it with your W&B and optional notification settings." >&2
     exit 1
 fi
-# Created by setup_fresh_vm.sh with mode 600; contains W&B and ntfy credentials.
+# User-provided file containing W&B and optional notification credentials.
 source "${AUTH_FILE}"
 
 on_exit() {
