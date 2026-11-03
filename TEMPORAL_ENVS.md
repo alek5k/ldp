@@ -19,16 +19,75 @@ frames, no crop, and `SpatialMeanPool` rather than SpatialSoftmax. The commands
 below set the visual options explicitly so an exported shell variable cannot
 change the experiment accidentally.
 
-## Run presets
+## Current TC-DP paper comparison: three training seeds
+
+Use training seeds 42, 43, and 44 for both WaitAtGoal and LiftQA. The saved
+configurations are in `experiment_configs/paper_ptp_seeds/20261029_234821/`.
+Each environment has seed-43 and seed-44 configurations; the example below
+uses the seed-43 configuration as a template and overrides the training seed
+for all three runs. The dataset split seed stays fixed at 42.
+
+The paper comparison uses 16 adjacent observations, a 32-token prediction
+horizon, eight executed actions, full PTP (`past_action_pred=true`,
+`past_steps_reg=-1`), batch size 128, and 500 epochs. It uses full 144x144 images
+with no crop and `SpatialMeanPool`. Online training rollouts are disabled;
+checkpoint selection uses held-out validation loss.
+
+From the repository root, set the local demonstration path and run:
+
+```bash
+ENV=liftqa
+DATASET=/path/to/lift_qa_v2.zarr
+export MUJOCO_GL=egl SDL_VIDEODRIVER=dummy NUMBA_DISABLE_JIT=1
+for SEED in 42 43 44; do
+    RUN="${ENV}_ptp_seed${SEED}"
+    python train.py \
+        --config-dir=experiment_configs/paper_ptp_seeds/20261029_234821 \
+        --config-name="${ENV}_seed43" \
+        training.seed="$SEED" training.device=cuda:0 \
+        task.dataset.zarr_path="$DATASET" \
+        hydra.run.dir="data/outputs/$RUN" multi_run.run_dir="data/outputs/$RUN" \
+        logging.name="$RUN" logging.mode=disabled
+done
+```
+
+Repeat with `ENV=waitatgoal` and the local path to
+`wait_at_goal_dataset_v4.zarr`. Select the checkpoint with the lowest validation
+loss separately for each training seed, then evaluate each selected checkpoint
+on the same 200 evaluation seeds:
+
+```bash
+ENV=liftqa
+SEED=42
+CHECKPOINT=/path/to/selected_validation_checkpoint.ckpt
+./eval_temporal_policy.sh "$ENV" "$CHECKPOINT" "data/inference/${ENV}_ptp_seed${SEED}" \
+    --n_test=200 --n_test_vis=0 --test_start_seed=1000 \
+    --max_steps=400 --num_inference_steps=100
+```
+
+Repeat evaluation for training seeds 43 and 44, and for WaitAtGoal. Evaluation
+is a separate step; training does not launch it automatically.
+
+The current comparison table is generated in TemporalDiffusionPolicy using
+`python -m temporal_diffusion_policy.analysis.report` (the default `paper_main`
+preset), or `--config main_multiseed` for the simulation-only comparison. Point
+its `tc_dp_paper_multiseed` study lists at the three `rollouts.zarr` outputs per
+environment. The report computes each metric per training seed and reports
+the mean and sample standard deviation. The lower learning-rate LiftQA trial
+is a separate exploratory experiment and is not part of this comparison.
+
+## Other single-run presets
 
 The training launcher always enables full PTP (`past_action_pred=true`,
 `past_steps_reg=-1`), validates every 10 epochs, and ranks checkpoints by
-held-out `val_loss`. Training rollouts are disabled; each command runs the
-fixed-seed Zarr evaluation immediately afterward.
+held-out `val_loss`. It enables online rollouts every 50 epochs by default;
+the commands below also launch a separate Zarr evaluation after training.
+These older examples use evaluation seeds starting at 200; use the
+three-seed protocol above for the current paper comparison.
 
-### Fair TC-DP comparison
+### Short-history comparison
 
-Use this for a direct comparison with the current TC-DP inference setup: two
+This exploratory preset matches the short-history TC-DP inference horizons: two
 adjacent observations, 16 predicted tokens, eight executed actions, batch size
 512, and 200 epochs. It has one PTP past-action target and 14 future-action
 targets.
@@ -48,7 +107,7 @@ current action, and 16 future actions. `n_action_steps=8` is separate: it only
 controls how many predicted actions are executed before replanning.
 
 Both environments use `subsample_frames=1`, so all 16 observations are
-adjacent rather than temporally spaced. Batch size 64 keeps the 16-image visual
+adjacent rather than temporally spaced. Batch size 128 keeps the 16-image visual
 context practical; 500 epochs follows the paper's simulation-training
 duration.
 

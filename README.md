@@ -7,7 +7,9 @@ Paper: https://arxiv.org/abs/2505.09561
 We are very grateful for the great work done by Chi et al with the [Diffusion Policy](https://github.com/real-stanford/diffusion_policy) github repository, from which we adapted our repository.
 
 For the migrated WaitAtGoal and LiftQA environments, native Zarr recording,
-long-context training, and analysis rollouts, see [TEMPORAL_ENVS.md](TEMPORAL_ENVS.md).
+and the current TC-DP paper's three-training-seed PTP comparison, start with
+[TEMPORAL_ENVS.md](TEMPORAL_ENVS.md#current-tc-dp-paper-comparison-three-training-seeds).
+The benchmark instructions below describe the original PTP paper.
 
 # 🧰 Installation
 

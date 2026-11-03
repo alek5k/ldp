@@ -1,5 +1,10 @@
 # Paper-reproduction PTP configs
 
+This page describes reproduction of the original PTP paper. For the current
+TC-DP paper's three-seed WaitAtGoal and LiftQA comparison, use the saved configs
+under `paper_ptp_seeds/20261029_234821/` and the protocol in
+[TEMPORAL_ENVS.md](../TEMPORAL_ENVS.md#current-tc-dp-paper-comparison-three-training-seeds).
+
 The `*_paper.yaml` files reproduce the long-context diffusion + PTP settings
 reported in *Learning Long-Context Diffusion Policies via Past-Token
 Prediction*. They compose the corresponding `*_emb.yaml` configuration, which
