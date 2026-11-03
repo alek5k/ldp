@@ -6,6 +6,37 @@ previously maintained in TemporalDiffusionPolicy. Training reads the existing
 TemporalDiffusionPolicy Zarr episodes directly; no data collection or HDF5
 conversion is required.
 
+## Download the current paper checkpoints and rollouts
+
+The six selected PTP checkpoints and six evaluation datasets for the main
+three-training-seed comparison are hosted under `ldp/` in
+[TC-DP data](https://huggingface.co/datasets/erdrsvhr9/temporally_conditioned_diffusion_policy).
+From this repository root, run:
+
+```bash
+python dataset_upload.py --download
+```
+
+The exact selection in `paper_upload_files.json` restores checkpoints and saved
+configurations under `data/outputs/` and extracts rollouts under `data/inference/`.
+All rollout image arrays are retained as uint8 pixels (0–255); normalize them
+when using them as model inputs. The WaitAtGoal and LiftQA demonstrations are
+shared with TemporalDiffusionPolicy and are downloaded using that repository's
+`./scripts/download_demos.sh`; they are not duplicated for PTP. Set local paths
+in training configurations and TemporalDiffusionPolicy analysis study lists.
+Ablations and exploratory runs are excluded from this upload selection.
+
+To upload the selected PTP data with Hugging Face write access:
+
+```bash
+python dataset_upload.py --dry-run
+python dataset_upload.py
+```
+
+The script archives each Zarr directory without changing its contents and uploads
+only the explicit selection. It preserves existing hosted files and visibility.
+Use `--stage-dir` to change `/tmp/tcdp-paper-hf-upload/ldp` staging.
+
 ## Environment
 
 ```bash

@@ -1,0 +1,108 @@
+{
+  "description": "Main TC-DP paper comparison only; rollout images retained; no ablations or robomimic demonstrations.",
+  "repo_id": "erdrsvhr9/temporally_conditioned_diffusion_policy",
+  "files": [
+    {
+      "source": "data/outputs/waitatgoal_ptp_20260730_162141/checkpoints/epoch=0149-val_loss=0.070.ckpt",
+      "remote": "ldp/outputs/waitatgoal_ptp_20260730_162141/checkpoints/epoch=0149-val_loss=0.070.ckpt",
+      "category": "checkpoint",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/outputs/waitatgoal_ptp_paper_20261029_234821_seed43/checkpoints/epoch=0049-val_loss=0.068.ckpt",
+      "remote": "ldp/outputs/waitatgoal_ptp_paper_20261029_234821_seed43/checkpoints/epoch=0049-val_loss=0.068.ckpt",
+      "category": "checkpoint",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/outputs/waitatgoal_ptp_paper_20261029_234821_seed44/checkpoints/epoch=0049-val_loss=0.071.ckpt",
+      "remote": "ldp/outputs/waitatgoal_ptp_paper_20261029_234821_seed44/checkpoints/epoch=0049-val_loss=0.071.ckpt",
+      "category": "checkpoint",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_20260730_180713/checkpoints/epoch=0049-val_loss=0.077.ckpt",
+      "remote": "ldp/outputs/liftqa_ptp_20260730_180713/checkpoints/epoch=0049-val_loss=0.077.ckpt",
+      "category": "checkpoint",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_paper_20261029_234821_seed43/checkpoints/epoch=0049-val_loss=0.070.ckpt",
+      "remote": "ldp/outputs/liftqa_ptp_paper_20261029_234821_seed43/checkpoints/epoch=0049-val_loss=0.070.ckpt",
+      "category": "checkpoint",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_paper_20261029_234821_seed44/checkpoints/epoch=0049-val_loss=0.068.ckpt",
+      "remote": "ldp/outputs/liftqa_ptp_paper_20261029_234821_seed44/checkpoints/epoch=0049-val_loss=0.068.ckpt",
+      "category": "checkpoint",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed42_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed42_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed43_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed43_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed44_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/waitatgoal_ptp_trainseed44_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "WaitAtGoal"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed42_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed42_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed43_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed43_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed44_eval1000/rollouts.zarr",
+      "remote": "ldp/inference/paper_ptp_eval_20261102_112906/liftqa_ptp_trainseed44_eval1000/rollouts.zarr.zip",
+      "category": "inference",
+      "environment": "LiftQA"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_paper_20261029_234821_seed43/final_resolved_config.yaml",
+      "remote": "ldp/outputs/liftqa_ptp_paper_20261029_234821_seed43/final_resolved_config.yaml",
+      "category": "config"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_paper_20261029_234821_seed44/final_resolved_config.yaml",
+      "remote": "ldp/outputs/liftqa_ptp_paper_20261029_234821_seed44/final_resolved_config.yaml",
+      "category": "config"
+    },
+    {
+      "source": "data/outputs/waitatgoal_ptp_paper_20261029_234821_seed43/final_resolved_config.yaml",
+      "remote": "ldp/outputs/waitatgoal_ptp_paper_20261029_234821_seed43/final_resolved_config.yaml",
+      "category": "config"
+    },
+    {
+      "source": "data/outputs/waitatgoal_ptp_paper_20261029_234821_seed44/final_resolved_config.yaml",
+      "remote": "ldp/outputs/waitatgoal_ptp_paper_20261029_234821_seed44/final_resolved_config.yaml",
+      "category": "config"
+    },
+    {
+      "source": "data/outputs/liftqa_ptp_20260730_180713/final_resolved_config.yaml",
+      "remote": "ldp/outputs/liftqa_ptp_20260730_180713/final_resolved_config.yaml",
+      "category": "config"
+    },
+    {
+      "source": "data/outputs/waitatgoal_ptp_20260730_162141/final_resolved_config.yaml",
+      "remote": "ldp/outputs/waitatgoal_ptp_20260730_162141/final_resolved_config.yaml",
+      "category": "config"
+    }
+  ]
+}

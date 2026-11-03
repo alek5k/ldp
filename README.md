@@ -215,3 +215,10 @@ If you use the code, remember to cite our paper:
       url={https://arxiv.org/abs/2505.09561}, 
 }
 ```
+
+### TC-DP paper data
+
+For the main three-training-seed PTP comparison, see [TEMPORAL_ENVS.md](TEMPORAL_ENVS.md).
+Run `python dataset_upload.py --download` to obtain the selected checkpoints and
+rollouts, including images. The shared demonstrations are downloaded through
+TemporalDiffusionPolicy.
