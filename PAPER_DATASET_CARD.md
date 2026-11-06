@@ -47,10 +47,26 @@ The default `paper_main` report uses three training seeds for WaitAtGoal and
 LiftQA and the single-policy LiftQA-Real evaluations. It reports means and
 sample standard deviations across training seeds for the simulated tasks.
 
-The matching code's `paper_upload_files.json` lists the exact current-paper
-selection. The upload adds these files without deleting older hosted experiments.
+The matching TemporalDiffusionPolicy code's `tcdp_paper/paper_upload_files.json`
+and ldp's `paper_upload_files.json` list the exact current-paper selection. The upload adds these files without deleting older hosted experiments.
 The selection excludes ablations and other exploratory runs.
 
 Robomimic checkpoints and rollouts are hosted separately at
 https://huggingface.co/datasets/erdrsvhr9/temporally_conditioned_diffusion_policy_robomimic.
 Can, Lift and Square demonstrations should be obtained from robomimic upstream.
+
+## Citation
+
+Temporary citation for this repository during anonymous review. Replace this
+entry with the final publication details when available.
+
+```bibtex
+@misc{tcdp2026,
+  title={Mitigating Temporal Failures in Diffusion-Based Robotic Imitation Learning},
+  author={{Anonymous Authors}},
+  year={2026},
+  howpublished={Hugging Face dataset repository},
+  url={https://huggingface.co/datasets/erdrsvhr9/temporally_conditioned_diffusion_policy},
+  note={Anonymous review version; temporary citation}
+}
+```
